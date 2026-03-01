@@ -37,6 +37,7 @@ ORIGINAL_NAME="$(basename "$INBOX_FILE")"
 STEM="$(basename "$INBOX_FILE" .md)"
 TIMESTAMP="$(date '+%Y-%m-%d_%H%M')"
 REPORT="$OUTBOX/${TIMESTAMP}-${STEM}-digest.md"
+ENVELOPE="$OUTBOX/${TIMESTAMP}-${STEM}.envelope.json"
 TODAY="$(date '+%Y-%m-%d')"
 
 # Read inbox content (first 200 lines)
@@ -122,6 +123,32 @@ if [[ "$ENRICHED" == "false" ]]; then
   echo "Enrichment unavailable or invalid, using fallback."
 fi
 
+# --- Envelope writer function ---
+_write_envelope() {
+  local status="$1"
+  local enrichment_json="null"
+  if [[ "$ENRICHED" == "true" && -n "$RAW_JSON" ]]; then
+    enrichment_json="$RAW_JSON"
+  fi
+  # Escape task content for JSON embedding
+  local escaped_task
+  escaped_task="$(printf '%s' "$TASK_CONTENT" | jq -Rs '.' 2>/dev/null || printf '"%s"' "$(printf '%s' "$TASK_CONTENT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' '\\' | sed 's/\\/\\n/g')")"
+
+  cat > "$ENVELOPE" <<ENVEOF
+{
+  "version": "1.0.0",
+  "timestamp": "${TIMESTAMP}",
+  "source_file": "${ORIGINAL_NAME}",
+  "task_text": ${escaped_task},
+  "classification": null,
+  "planning": null,
+  "enrichment": ${enrichment_json},
+  "execution": {},
+  "status": "${status}"
+}
+ENVEOF
+}
+
 # --- Build report ---
 if ! {
   # Write original content
@@ -138,19 +165,25 @@ if ! {
 }; then
   mv "$INBOX_FILE" "$FAILED/$ORIGINAL_NAME"
   echo "[$TIMESTAMP] $ORIGINAL_NAME -> $(basename "$REPORT") -> Failed/ [error]" >> "$LOGS/${TODAY}.md"
+  # Write failure envelope
+  _write_envelope "failed"
   echo "Processing failed: $ORIGINAL_NAME (moved to Failed/)"
   exit 0
 fi
 
 # Success: move to Processed, log it
-ENRICH_TAG="[enriched]"
-if [[ "$ENRICHED" == "false" ]]; then
-  ENRICH_TAG="[unenriched]"
+ENVELOPE_STATUS="unenriched"
+if [[ "$ENRICHED" == "true" ]]; then
+  ENVELOPE_STATUS="enriched"
 fi
 
+# --- Write envelope.json ---
+_write_envelope "$ENVELOPE_STATUS"
+
 mv "$INBOX_FILE" "$PROCESSED/$ORIGINAL_NAME"
-echo "[$TIMESTAMP] $ORIGINAL_NAME -> $(basename "$REPORT") -> Processed/ $ENRICH_TAG" >> "$LOGS/${TODAY}.md"
+echo "[$TIMESTAMP] $ORIGINAL_NAME -> $(basename "$REPORT") -> Processed/ [$ENVELOPE_STATUS]" >> "$LOGS/${TODAY}.md"
 
 echo "Digest written: $REPORT"
+echo "Envelope written: $ENVELOPE"
 echo "Inbox item moved to: $PROCESSED/$ORIGINAL_NAME"
 exit 0
