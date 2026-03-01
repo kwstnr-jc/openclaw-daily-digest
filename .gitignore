@@ -27,3 +27,8 @@ tests/bats-core/
 .idea/
 .vscode/
 .prompts/*
+
+
+# Added by cargo
+
+/target

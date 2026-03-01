@@ -3,7 +3,7 @@
 # Orchestrator integration tests using temp directories and mock OpenClaw.
 
 REPO_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
-SCRIPT="$REPO_DIR/bin/run-digest.sh"
+SCRIPT="$REPO_DIR/bin/run-digest-bash.sh"
 FIXTURES="$REPO_DIR/tests/fixtures"
 MOCK_DIR="$REPO_DIR/tests/helpers"
 
