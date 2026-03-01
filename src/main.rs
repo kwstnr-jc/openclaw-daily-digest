@@ -138,6 +138,7 @@ struct ItemResult {
     exec_status: String,
     enriched: bool,
     failed: bool,
+    pr_url: Option<String>,
 }
 
 fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discord: bool) -> i32 {
@@ -267,6 +268,7 @@ fn process_one_item(
                 exec_status: "failed".to_string(),
                 enriched: false,
                 failed: true,
+                pr_url: None,
             };
         }
     };
@@ -307,7 +309,7 @@ fn process_one_item(
         enrich(&task_content, openclaw_cmd, policy);
 
     // --- Execution Handlers ---
-    let (exec_result, exec_json, exec_file) = execute_handler(
+    let (exec_result, exec_json, exec_file, pr_url) = execute_handler(
         &action_type,
         &task_content,
         outbox,
@@ -315,6 +317,10 @@ fn process_one_item(
         stem,
         openclaw_cmd,
         policy,
+        projects_dir,
+        project_name.as_deref(),
+        &project_kind,
+        &enrichment_rendered,
     );
     println!("Execution: {}", exec_result);
 
@@ -347,6 +353,7 @@ fn process_one_item(
             exec_status: "failed".to_string(),
             enriched: false,
             failed: true,
+            pr_url: None,
         };
     }
 
@@ -390,6 +397,7 @@ fn process_one_item(
         exec_status: exec_result,
         enriched,
         failed: false,
+        pr_url,
     }
 }
 
@@ -818,6 +826,7 @@ fn enrich(
 // Execution handlers
 // ---------------------------------------------------------------------------
 
+/// Returns (status, json, output_file, pr_url).
 fn execute_handler(
     action_type: &str,
     task_content: &str,
@@ -826,127 +835,425 @@ fn execute_handler(
     stem: &str,
     openclaw_cmd: &str,
     policy: &Option<PolicyConfig>,
-) -> (String, serde_json::Value, Option<String>) {
+    projects_dir: &Path,
+    project_name: Option<&str>,
+    project_kind: &str,
+    enrichment_rendered: &str,
+) -> (String, serde_json::Value, Option<String>, Option<String>) {
     match action_type {
         "research" => {
-            let exec_file =
-                outbox.join(format!("{}-{}.research.md", timestamp, stem));
-            println!("Executing research handler...");
-            if which_exists(openclaw_cmd) {
-                let model = select_model(policy, "research", task_content);
-                let mut args = vec![
-                    "agent".to_string(),
-                    "--agent".to_string(),
-                    "main".to_string(),
-                    "--timeout".to_string(),
-                    "120".to_string(),
-                ];
-                if let Some(ref m) = model {
-                    args.push("--model".to_string());
-                    args.push(m.clone());
-                }
-                let prompt = format!(
-                    "You are a research assistant. Given the task below, produce a structured research report.\n\n\
-                     Format your response as markdown with these exact sections:\n\
-                     ## Summary\n(2-3 sentence overview)\n\n\
-                     ## Findings\n(bulleted list of key findings)\n\n\
-                     ## Sources\n(bulleted list — use placeholder URLs for now)\n\n\
-                     ## Next Steps\n(bulleted list of recommended follow-up actions)\n\n\
-                     Task:\n{}",
-                    task_content
-                );
-                args.push("--message".to_string());
-                args.push(prompt);
-
-                if let Some(output) = call_openclaw(openclaw_cmd, &args) {
-                    if !output.is_empty() {
-                        let _ = fs::write(&exec_file, &output);
-                        let fname = exec_file
-                            .file_name()
-                            .unwrap()
-                            .to_string_lossy()
-                            .to_string();
-                        println!(
-                            "Research report written: {}",
-                            exec_file.display()
-                        );
-                        let json = serde_json::json!({"handler":"research","status":"completed","output_file":fname});
-                        return ("completed".to_string(), json, Some(fname));
-                    }
-                }
-                let json = serde_json::json!({"handler":"research","status":"failed","reason":"OpenClaw returned empty response"});
-                ("failed".to_string(), json, None)
-            } else {
-                let json = serde_json::json!({"handler":"research","status":"skipped","reason":"OpenClaw not available"});
-                ("skipped".to_string(), json, None)
-            }
+            let (s, j, f) = execute_research(task_content, outbox, timestamp, stem, openclaw_cmd, policy);
+            (s, j, f, None)
         }
         "question" => {
-            let exec_file =
-                outbox.join(format!("{}-{}.research.md", timestamp, stem));
-            println!("Executing question handler...");
-            if which_exists(openclaw_cmd) {
-                let model = select_model(policy, "question", task_content);
-                let mut args = vec![
-                    "agent".to_string(),
-                    "--agent".to_string(),
-                    "main".to_string(),
-                    "--timeout".to_string(),
-                    "120".to_string(),
-                ];
-                if let Some(ref m) = model {
-                    args.push("--model".to_string());
-                    args.push(m.clone());
-                }
-                let prompt = format!(
-                    "You are an expert assistant. Given the question below, produce a structured answer.\n\n\
-                     Format your response as markdown with these exact sections:\n\
-                     ## Answer\n(clear, direct answer to the question)\n\n\
-                     ## Details\n(supporting explanation with bullet points)\n\n\
-                     ## Sources\n(bulleted list — use placeholder URLs for now)\n\n\
-                     ## Follow-up Questions\n(bulleted list of related questions worth exploring)\n\n\
-                     Question:\n{}",
-                    task_content
-                );
-                args.push("--message".to_string());
-                args.push(prompt);
-
-                if let Some(output) = call_openclaw(openclaw_cmd, &args) {
-                    if !output.is_empty() {
-                        let _ = fs::write(&exec_file, &output);
-                        let fname = exec_file
-                            .file_name()
-                            .unwrap()
-                            .to_string_lossy()
-                            .to_string();
-                        println!(
-                            "Answer report written: {}",
-                            exec_file.display()
-                        );
-                        let json = serde_json::json!({"handler":"question","status":"completed","output_file":fname});
-                        return ("completed".to_string(), json, Some(fname));
-                    }
-                }
-                let json = serde_json::json!({"handler":"question","status":"failed","reason":"OpenClaw returned empty response"});
-                ("failed".to_string(), json, None)
-            } else {
-                let json = serde_json::json!({"handler":"question","status":"skipped","reason":"OpenClaw not available"});
-                ("skipped".to_string(), json, None)
-            }
+            let (s, j, f) = execute_question(task_content, outbox, timestamp, stem, openclaw_cmd, policy);
+            (s, j, f, None)
         }
-        "repo-change" => {
-            println!("Execution blocked: repo-change requires approval");
-            let json = serde_json::json!({"handler":"repo-change","status":"blocked","reason":"Execution blocked: requires approval"});
-            ("blocked".to_string(), json, None)
-        }
+        "repo-change" => execute_repo_change(
+            task_content, outbox, timestamp, stem, openclaw_cmd, policy,
+            projects_dir, project_name, project_kind, enrichment_rendered,
+        ),
         "ops" => {
-            println!("Execution blocked: ops requires approval");
-            let json = serde_json::json!({"handler":"ops","status":"blocked","reason":"Execution blocked: requires approval"});
-            ("blocked".to_string(), json, None)
+            let (s, j, f) = execute_ops(task_content, outbox, timestamp, stem, openclaw_cmd, policy);
+            (s, j, f, None)
         }
         _ => {
             let json = serde_json::json!({"handler":"note","status":"none","reason":"No execution required for notes"});
-            ("none".to_string(), json, None)
+            ("none".to_string(), json, None, None)
+        }
+    }
+}
+
+fn execute_research(
+    task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
+    openclaw_cmd: &str, policy: &Option<PolicyConfig>,
+) -> (String, serde_json::Value, Option<String>) {
+    let exec_file = outbox.join(format!("{}-{}.research.md", timestamp, stem));
+    println!("Executing research handler...");
+    if !which_exists(openclaw_cmd) {
+        let json = serde_json::json!({"handler":"research","status":"skipped","reason":"OpenClaw not available"});
+        return ("skipped".to_string(), json, None);
+    }
+    let model = select_model(policy, "research", task_content);
+    let mut args = vec![
+        "agent".to_string(), "--agent".to_string(), "main".to_string(),
+        "--timeout".to_string(), "120".to_string(),
+    ];
+    if let Some(ref m) = model {
+        args.push("--model".to_string());
+        args.push(m.clone());
+    }
+    let prompt = format!(
+        "You are a research assistant. Given the task below, produce a structured research report.\n\n\
+         Format your response as markdown with these exact sections:\n\
+         ## Summary\n(2-3 sentence overview)\n\n\
+         ## Findings\n(bulleted list of key findings)\n\n\
+         ## Sources\n(bulleted list — use placeholder URLs for now)\n\n\
+         ## Next Steps\n(bulleted list of recommended follow-up actions)\n\n\
+         Task:\n{}", task_content
+    );
+    args.push("--message".to_string());
+    args.push(prompt);
+    if let Some(output) = call_openclaw(openclaw_cmd, &args) {
+        if !output.is_empty() {
+            let _ = fs::write(&exec_file, &output);
+            let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
+            println!("Research report written: {}", exec_file.display());
+            let json = serde_json::json!({"handler":"research","status":"completed","output_file":fname});
+            return ("completed".to_string(), json, Some(fname));
+        }
+    }
+    let json = serde_json::json!({"handler":"research","status":"failed","reason":"OpenClaw returned empty response"});
+    ("failed".to_string(), json, None)
+}
+
+fn execute_question(
+    task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
+    openclaw_cmd: &str, policy: &Option<PolicyConfig>,
+) -> (String, serde_json::Value, Option<String>) {
+    let exec_file = outbox.join(format!("{}-{}.research.md", timestamp, stem));
+    println!("Executing question handler...");
+    if !which_exists(openclaw_cmd) {
+        let json = serde_json::json!({"handler":"question","status":"skipped","reason":"OpenClaw not available"});
+        return ("skipped".to_string(), json, None);
+    }
+    let model = select_model(policy, "question", task_content);
+    let mut args = vec![
+        "agent".to_string(), "--agent".to_string(), "main".to_string(),
+        "--timeout".to_string(), "120".to_string(),
+    ];
+    if let Some(ref m) = model {
+        args.push("--model".to_string());
+        args.push(m.clone());
+    }
+    let prompt = format!(
+        "You are an expert assistant. Given the question below, produce a structured answer.\n\n\
+         Format your response as markdown with these exact sections:\n\
+         ## Answer\n(clear, direct answer to the question)\n\n\
+         ## Details\n(supporting explanation with bullet points)\n\n\
+         ## Sources\n(bulleted list — use placeholder URLs for now)\n\n\
+         ## Follow-up Questions\n(bulleted list of related questions worth exploring)\n\n\
+         Question:\n{}", task_content
+    );
+    args.push("--message".to_string());
+    args.push(prompt);
+    if let Some(output) = call_openclaw(openclaw_cmd, &args) {
+        if !output.is_empty() {
+            let _ = fs::write(&exec_file, &output);
+            let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
+            println!("Answer report written: {}", exec_file.display());
+            let json = serde_json::json!({"handler":"question","status":"completed","output_file":fname});
+            return ("completed".to_string(), json, Some(fname));
+        }
+    }
+    let json = serde_json::json!({"handler":"question","status":"failed","reason":"OpenClaw returned empty response"});
+    ("failed".to_string(), json, None)
+}
+
+// ---------------------------------------------------------------------------
+// Repo-change autonomous execution
+// ---------------------------------------------------------------------------
+
+fn execute_repo_change(
+    task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
+    openclaw_cmd: &str, policy: &Option<PolicyConfig>,
+    projects_dir: &Path, project_name: Option<&str>,
+    project_kind: &str, enrichment_rendered: &str,
+) -> (String, serde_json::Value, Option<String>, Option<String>) {
+    println!("Executing repo-change handler...");
+
+    // 1. Determine target repo
+    let repo_dir = match find_repo_dir(projects_dir, project_name, project_kind) {
+        Some(d) => d,
+        None => {
+            let reason = "Cannot determine target repo";
+            println!("{}", reason);
+            let json = serde_json::json!({"handler":"repo-change","status":"skipped","reason":reason});
+            return ("skipped".to_string(), json, None, None);
+        }
+    };
+    println!("Target repo: {}", repo_dir.display());
+
+    if !which_exists(openclaw_cmd) {
+        let json = serde_json::json!({"handler":"repo-change","status":"skipped","reason":"OpenClaw not available"});
+        return ("skipped".to_string(), json, None, None);
+    }
+
+    // 2. Create feature branch
+    let slug: String = stem.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-')
+        .collect::<String>()
+        .to_lowercase();
+    let short_ts = &timestamp.replace('-', "").replace('_', "");
+    let short_ts = if short_ts.len() >= 8 { &short_ts[4..8] } else { short_ts.as_str() };
+    let branch_name = format!("agent/{}-{}", slug, short_ts);
+
+    let default_branch = git_default_branch(&repo_dir);
+    println!("Default branch: {}, creating: {}", default_branch, branch_name);
+
+    let _ = run_git(&repo_dir, &["fetch", "origin"]);
+    if run_git(&repo_dir, &["checkout", &default_branch]).is_err() {
+        let json = serde_json::json!({"handler":"repo-change","status":"failed","reason":"Cannot checkout default branch"});
+        return ("failed".to_string(), json, None, None);
+    }
+    let _ = run_git(&repo_dir, &["pull", "--ff-only"]);
+    if run_git(&repo_dir, &["checkout", "-b", &branch_name]).is_err() {
+        let json = serde_json::json!({"handler":"repo-change","status":"failed","reason":"Cannot create feature branch"});
+        return ("failed".to_string(), json, None, None);
+    }
+
+    // 3. Execute code change via OpenClaw
+    let model = select_model(policy, "execution", task_content);
+    let mut args = vec![
+        "agent".to_string(), "--agent".to_string(), "default".to_string(),
+        "--timeout".to_string(), "300".to_string(),
+    ];
+    if let Some(ref m) = model {
+        args.push("--model".to_string());
+        args.push(m.clone());
+    }
+    args.push("--message".to_string());
+    args.push(format!(
+        "You are working in the repository at {}. Execute the following task.\n\n\
+         Task:\n{}\n\nPlanned actions:\n{}",
+        repo_dir.display(), task_content, enrichment_rendered
+    ));
+
+    println!("Calling OpenClaw for code change...");
+    let openclaw_output = call_openclaw_in_dir(openclaw_cmd, &args, &repo_dir);
+
+    if openclaw_output.is_none() {
+        let _ = run_git(&repo_dir, &["checkout", &default_branch]);
+        let _ = run_git(&repo_dir, &["branch", "-D", &branch_name]);
+        let json = serde_json::json!({"handler":"repo-change","status":"failed","reason":"OpenClaw execution failed"});
+        return ("failed".to_string(), json, None, None);
+    }
+
+    // 4. Check for changes, commit and push
+    let has_changes = run_git(&repo_dir, &["diff", "--quiet"]).is_err()
+        || run_git(&repo_dir, &["diff", "--cached", "--quiet"]).is_err()
+        || !git_untracked_files(&repo_dir).is_empty();
+
+    if !has_changes {
+        println!("No changes after OpenClaw execution — no-op.");
+        let _ = run_git(&repo_dir, &["checkout", &default_branch]);
+        let _ = run_git(&repo_dir, &["branch", "-D", &branch_name]);
+        let json = serde_json::json!({"handler":"repo-change","status":"no-op","reason":"No changes produced"});
+        return ("no-op".to_string(), json, None, None);
+    }
+
+    let _ = run_git(&repo_dir, &["add", "-A"]);
+    let first_line = task_content.lines().find(|l| !l.trim().is_empty()).unwrap_or("agent task");
+    let commit_msg = format!(
+        "feat: {}\n\nAutonomously executed by openclaw-daily-digest.\nSource: {}",
+        first_line.trim().trim_start_matches("Project:").trim().to_lowercase(), stem
+    );
+    if run_git(&repo_dir, &["commit", "-m", &commit_msg]).is_err() {
+        let _ = run_git(&repo_dir, &["checkout", &default_branch]);
+        let _ = run_git(&repo_dir, &["branch", "-D", &branch_name]);
+        let json = serde_json::json!({"handler":"repo-change","status":"failed","reason":"Git commit failed"});
+        return ("failed".to_string(), json, None, None);
+    }
+
+    if run_git(&repo_dir, &["push", "-u", "origin", &branch_name]).is_err() {
+        eprintln!("Git push failed, branch {} exists locally", branch_name);
+        let json = serde_json::json!({"handler":"repo-change","status":"failed","reason":"Git push failed","branch":branch_name});
+        return ("failed".to_string(), json, None, None);
+    }
+    println!("Pushed branch: {}", branch_name);
+
+    // 5. Open PR via gh
+    let pr_title = first_line.trim().trim_start_matches("Project:").trim();
+    let pr_title = if pr_title.len() > 70 { &pr_title[..70] } else { pr_title };
+    let pr_body = format!(
+        "## Task\n\n{}\n\n## Planned Actions\n\n{}\n\n---\n\n_Auto-generated by openclaw-daily-digest agent._",
+        task_content, enrichment_rendered
+    );
+    let pr_url = create_pull_request(&repo_dir, pr_title, &pr_body, &default_branch);
+
+    // Write execution log
+    let exec_file = outbox.join(format!("{}-{}.repo-change.md", timestamp, stem));
+    let exec_log = format!(
+        "# Repo-Change Execution\n\n- **Repo:** {}\n- **Branch:** {}\n- **PR:** {}\n- **Status:** {}\n\n\
+         ## OpenClaw Output\n\n```\n{}\n```\n",
+        repo_dir.display(), branch_name,
+        pr_url.as_deref().unwrap_or("(none)"),
+        if pr_url.is_some() { "completed" } else { "pushed" },
+        openclaw_output.as_deref().unwrap_or("(no output)"),
+    );
+    let _ = fs::write(&exec_file, &exec_log);
+    let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
+
+    let status = if pr_url.is_some() { "completed" } else { "pushed" };
+    let json = serde_json::json!({
+        "handler": "repo-change", "status": status,
+        "branch": branch_name, "pr_url": pr_url, "output_file": fname,
+    });
+
+    let _ = run_git(&repo_dir, &["checkout", &default_branch]);
+    (status.to_string(), json, Some(fname), pr_url)
+}
+
+// ---------------------------------------------------------------------------
+// Ops autonomous execution
+// ---------------------------------------------------------------------------
+
+fn execute_ops(
+    task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
+    openclaw_cmd: &str, policy: &Option<PolicyConfig>,
+) -> (String, serde_json::Value, Option<String>) {
+    println!("Executing ops handler...");
+
+    if !which_exists(openclaw_cmd) {
+        let json = serde_json::json!({"handler":"ops","status":"skipped","reason":"OpenClaw not available"});
+        return ("skipped".to_string(), json, None);
+    }
+
+    // Safety check: scan task for dangerous patterns
+    let lower = task_content.to_lowercase();
+    let dangerous = ["rm -rf", "rm -r /", "ssh-keygen", "ssh_key",
+        "credential", "passwd", ".ssh/authorized_keys", "sudoers"];
+    for pattern in &dangerous {
+        if lower.contains(pattern) {
+            println!("Skipped: potentially unsafe ops task (matched: {})", pattern);
+            let json = serde_json::json!({
+                "handler": "ops", "status": "skipped",
+                "reason": format!("Skipped: potentially unsafe (matched: {})", pattern),
+            });
+            return ("skipped".to_string(), json, None);
+        }
+    }
+
+    let model = select_model(policy, "execution", task_content);
+    let mut args = vec![
+        "agent".to_string(), "--agent".to_string(), "default".to_string(),
+        "--timeout".to_string(), "120".to_string(),
+    ];
+    if let Some(ref m) = model {
+        args.push("--model".to_string());
+        args.push(m.clone());
+    }
+    args.push("--message".to_string());
+    args.push(format!(
+        "Execute the following ops task. Only use safe commands \
+         (brew install/upgrade, launchctl load/unload, mkdir, cp, ln, chmod). \
+         NEVER use rm -rf, never delete data, never modify SSH keys or credentials.\n\n\
+         Task:\n{}", task_content
+    ));
+
+    println!("Calling OpenClaw for ops task...");
+    let output = call_openclaw(openclaw_cmd, &args);
+
+    let exec_file = outbox.join(format!("{}-{}.ops-log.md", timestamp, stem));
+    let exec_log = format!(
+        "# Ops Execution Log\n\n## Task\n\n{}\n\n## Output\n\n```\n{}\n```\n\n## Status\n\n{}\n",
+        task_content,
+        output.as_deref().unwrap_or("(no output)"),
+        if output.is_some() { "completed" } else { "failed" },
+    );
+    let _ = fs::write(&exec_file, &exec_log);
+    let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
+
+    let status = if output.is_some() { "completed" } else { "failed" };
+    let json = serde_json::json!({"handler": "ops", "status": status, "output_file": fname});
+    (status.to_string(), json, Some(fname))
+}
+
+// ---------------------------------------------------------------------------
+// Git / GitHub helpers
+// ---------------------------------------------------------------------------
+
+fn find_repo_dir(projects_dir: &Path, project_name: Option<&str>, project_kind: &str) -> Option<PathBuf> {
+    let name = project_name?;
+    if project_kind != "existing" && project_kind != "new" {
+        return None;
+    }
+    // Check $ROOT/Projects/<name>/
+    let candidate = projects_dir.join(name);
+    if candidate.join(".git").exists() {
+        return Some(candidate);
+    }
+    // Check ~/work/<name>/
+    if let Ok(home) = std::env::var("HOME") {
+        let candidate = PathBuf::from(home).join("work").join(name);
+        if candidate.join(".git").exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn git_default_branch(repo_dir: &Path) -> String {
+    if let Ok(output) = Command::new("git")
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD", "--short"])
+        .current_dir(repo_dir).output()
+    {
+        if output.status.success() {
+            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            return branch.strip_prefix("origin/").unwrap_or(&branch).to_string();
+        }
+    }
+    if run_git(repo_dir, &["rev-parse", "--verify", "main"]).is_ok() {
+        return "main".to_string();
+    }
+    "master".to_string()
+}
+
+fn run_git(repo_dir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git").args(args).current_dir(repo_dir)
+        .output().map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+fn git_untracked_files(repo_dir: &Path) -> Vec<String> {
+    match Command::new("git").args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(repo_dir).output()
+    {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).lines()
+                .filter(|l| !l.is_empty()).map(|l| l.to_string()).collect()
+        }
+        _ => vec![],
+    }
+}
+
+fn call_openclaw_in_dir(cmd: &str, args: &[String], dir: &Path) -> Option<String> {
+    let output = Command::new(cmd).args(args).current_dir(dir).output().ok()?;
+    if !output.status.success() { return None; }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if stdout.trim().is_empty() { return None; }
+    Some(stdout)
+}
+
+fn create_pull_request(repo_dir: &Path, title: &str, body: &str, base: &str) -> Option<String> {
+    let output = Command::new("gh")
+        .args(["pr", "create", "--title", title, "--body", body, "--base", base])
+        .current_dir(repo_dir).output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if url.starts_with("http") {
+                println!("PR created: {}", url);
+                let _ = Command::new("gh")
+                    .args(["pr", "edit", &url, "--add-label", "agent-generated"])
+                    .current_dir(repo_dir).output();
+                Some(url)
+            } else {
+                println!("PR created but URL not recognized: {}", url);
+                Some(url)
+            }
+        }
+        Ok(o) => {
+            eprintln!("gh pr create failed: {}", String::from_utf8_lossy(&o.stderr));
+            None
+        }
+        Err(e) => {
+            eprintln!("gh not available: {}", e);
+            None
         }
     }
 }
@@ -1128,11 +1435,17 @@ fn format_discord_message(results: &[ItemResult]) -> String {
             "failed" => "failed",
             "none" => "filed",
             "skipped" => "skipped",
+            "no-op" => "no changes",
+            "pushed" => "pushed (PR failed)",
             _ => &r.exec_status,
         };
+        let pr_suffix = match &r.pr_url {
+            Some(url) => format!(" \u{2014} PR: {}", url),
+            None => String::new(),
+        };
         msg.push_str(&format!(
-            "\u{2022} `{}` \u{2192} **{}** ({}) \u{2014} {}\n",
-            r.source_file, project, r.action_type, detail
+            "\u{2022} `{}` \u{2192} **{}** ({}) \u{2014} {}{}\n",
+            r.source_file, project, r.action_type, detail, pr_suffix
         ));
     }
 
@@ -1507,9 +1820,10 @@ mod tests {
                 source_file: "fix-bug.md".to_string(),
                 project_name: Some("my-project".to_string()),
                 action_type: "repo-change".to_string(),
-                exec_status: "blocked".to_string(),
+                exec_status: "completed".to_string(),
                 enriched: true,
                 failed: false,
+                pr_url: Some("https://github.com/org/repo/pull/42".to_string()),
             },
             ItemResult {
                 source_file: "research-ai.md".to_string(),
@@ -1518,6 +1832,7 @@ mod tests {
                 exec_status: "completed".to_string(),
                 enriched: true,
                 failed: false,
+                pr_url: None,
             },
             ItemResult {
                 source_file: "grocery-list.md".to_string(),
@@ -1526,6 +1841,7 @@ mod tests {
                 exec_status: "none".to_string(),
                 enriched: false,
                 failed: false,
+                pr_url: None,
             },
         ];
 
@@ -1536,7 +1852,7 @@ mod tests {
         assert!(msg.contains("`fix-bug.md`"));
         assert!(msg.contains("**my-project**"));
         assert!(msg.contains("(repo-change)"));
-        assert!(msg.contains("blocked"));
+        assert!(msg.contains("PR: https://github.com/org/repo/pull/42"));
         assert!(msg.contains("`research-ai.md`"));
         assert!(msg.contains("**none**"));
         assert!(msg.contains("completed"));
@@ -1559,5 +1875,84 @@ mod tests {
         unsafe {
             std::env::remove_var("DISCORD_TOKEN_FILE");
         }
+    }
+
+    #[test]
+    fn test_repo_change_skipped_no_git_repo() {
+        let vault = TestVault::new();
+        // Create project dir without .git
+        vault.create_project("my-project");
+        vault.place_inbox(
+            "fix-thing.md",
+            "Project: my-project\n\nFix the broken thing.",
+        );
+
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+        assert!(vault.root.join("Inbox/Processed/fix-thing.md").exists());
+
+        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let content = fs::read_to_string(envelope_file.path()).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        // repo-change should be skipped because no .git dir exists
+        assert_eq!(envelope["execution"]["status"], "skipped");
+        assert_eq!(envelope["execution"]["handler"], "repo-change");
+    }
+
+    #[test]
+    fn test_ops_executed_with_output() {
+        let vault = TestVault::new();
+        vault.place_inbox(
+            "install-thing.md",
+            "Install htop via brew.\nlaunchctl list",
+        );
+
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+        assert!(vault.root.join("Inbox/Processed/install-thing.md").exists());
+
+        // Should have an ops-log file in outbox
+        let ops_log: Vec<_> = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().to_string_lossy().contains(".ops-log.md"))
+            .collect();
+        assert_eq!(ops_log.len(), 1);
+
+        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let content = fs::read_to_string(envelope_file.path()).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(envelope["execution"]["handler"], "ops");
+        assert_eq!(envelope["execution"]["status"], "completed");
+    }
+
+    #[test]
+    fn test_ops_skipped_dangerous_task() {
+        let vault = TestVault::new();
+        vault.place_inbox(
+            "dangerous-task.md",
+            "Install a cleanup tool. Then run rm -rf / to clean up disk space.",
+        );
+
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+        assert!(vault.root.join("Inbox/Processed/dangerous-task.md").exists());
+
+        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let content = fs::read_to_string(envelope_file.path()).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(envelope["execution"]["status"], "skipped");
     }
 }
