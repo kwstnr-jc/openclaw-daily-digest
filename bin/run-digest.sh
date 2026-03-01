@@ -7,6 +7,7 @@ OUTBOX="$ROOT/Outbox"
 LOGS="$ROOT/Logs"
 PROCESSED="$INBOX/Processed"
 FAILED="$INBOX/Failed"
+ENRICHMENT_TIMEOUT=120
 
 mkdir -p "$OUTBOX" "$LOGS" "$PROCESSED" "$FAILED"
 
@@ -24,20 +25,56 @@ TIMESTAMP="$(date '+%Y-%m-%d_%H%M')"
 REPORT="$OUTBOX/${TIMESTAMP}-${STEM}-digest.md"
 TODAY="$(date '+%Y-%m-%d')"
 
-# Process the inbox item; on failure move to Failed
-if ! {
-  # Copy first 200 lines into report
-  head -n 200 "$INBOX_FILE" > "$REPORT"
+# Read inbox content (first 200 lines)
+TASK_CONTENT="$(head -n 200 "$INBOX_FILE")"
 
-  # Append planned sections
-  cat >> "$REPORT" <<'EOF'
+# --- LLM Enrichment via OpenClaw CLI ---
+FALLBACK_ENRICHMENT="## Planned Actions
+- (LLM enrichment unavailable — manual review required)
+
+## Clarifying Questions
+- (none — enrichment skipped)
+
+## Suggested Next Step
+- Review inbox item manually and determine actions"
+
+ENRICHMENT=""
+if command -v openclaw &>/dev/null; then
+  echo "Calling OpenClaw for enrichment..."
+  ENRICHMENT="$(openclaw agent \
+    --agent main \
+    --timeout "$ENRICHMENT_TIMEOUT" \
+    --message "Given the following task, produce exactly three sections with these headings:
 
 ## Planned Actions
-- (placeholder)
+(bullet list of concrete actions)
 
-## Next Step
-- (placeholder)
-EOF
+## Clarifying Questions
+(bullet list, or \"- None\" if the task is clear)
+
+## Suggested Next Step
+(single bullet: the immediate next action)
+
+Task:
+$TASK_CONTENT" 2>/dev/null)" || true
+fi
+
+# Use fallback if enrichment is empty or failed
+if [[ -z "${ENRICHMENT// /}" ]]; then
+  echo "Enrichment unavailable, using fallback."
+  ENRICHMENT="$FALLBACK_ENRICHMENT"
+else
+  echo "Enrichment received."
+fi
+
+# --- Build report ---
+if ! {
+  # Write original content
+  echo "$TASK_CONTENT" > "$REPORT"
+
+  # Append enrichment
+  printf '\n---\n\n' >> "$REPORT"
+  echo "$ENRICHMENT" >> "$REPORT"
 }; then
   mv "$INBOX_FILE" "$FAILED/$ORIGINAL_NAME"
   echo "[$TIMESTAMP] FAILED: $ORIGINAL_NAME" >> "$LOGS/${TODAY}.md"
@@ -47,7 +84,7 @@ fi
 
 # Success: move to Processed, log it
 mv "$INBOX_FILE" "$PROCESSED/$ORIGINAL_NAME"
-echo "[$TIMESTAMP] Digest created: $(basename "$REPORT") from $ORIGINAL_NAME -> Processed/" >> "$LOGS/${TODAY}.md"
+echo "[$TIMESTAMP] Digest created: $(basename "$REPORT") from $ORIGINAL_NAME -> Processed/ [enriched]" >> "$LOGS/${TODAY}.md"
 
 echo "Digest written: $REPORT"
 echo "Inbox item moved to: $PROCESSED/$ORIGINAL_NAME"
