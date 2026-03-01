@@ -20,9 +20,9 @@ function — its failure degrades output but never breaks the run.
 
 ## Implementation
 
-- **Rust binary** (sole implementation): `src/main.rs` (~2100 lines, 23 tests)
-  with clap CLI (`run --root --dry-run --max-items --no-discord`), serde JSON,
-  reqwest for Discord, atomic writes, `OPENCLAW_CMD` env var for mock injection.
+- **Rust binary** (sole implementation): split across 10 modules (~2100 lines total,
+  23 tests) with clap CLI (`run --root --dry-run --max-items --no-discord`), serde
+  JSON, reqwest for Discord, atomic writes, `OPENCLAW_CMD` env var for mock injection.
 - **Thin wrapper**: `bin/run-digest.sh` → delegates to Rust binary, errors if not built.
 - Bash reference implementation has been **removed** (prompt 11+).
 
@@ -30,7 +30,16 @@ function — its failure degrades output but never breaks the run.
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Rust orchestrator (~2100 lines, 23 tests) |
+| `src/main.rs` | CLI, `main()`, `run()`, `process_one_item()`, 23 tests (~950 lines) |
+| `src/types.rs` | Shared data structs: Enrichment, Envelope, ItemResult, etc. |
+| `src/policy.rs` | PolicyConfig, `load_policy()`, `select_model()` |
+| `src/classify.rs` | Project + action type classification |
+| `src/enrich.rs` | LLM enrichment |
+| `src/execute.rs` | Execution handlers (research, question, repo-change, ops) |
+| `src/git.rs` | Git/GitHub helpers, `create_pull_request()` |
+| `src/report.rs` | `build_report()` |
+| `src/discord.rs` | Discord message formatting + posting |
+| `src/util.rs` | IO helpers: `call_openclaw()`, `extract_json()`, `atomic_write()`, etc. |
 | `bin/run-digest.sh` | Wrapper (delegates to Rust binary) |
 | `bin/digest-now.sh` | On-demand trigger for Discord/manual |
 | `config/policy.json` | Model tiers: cheap/mid/expensive |
@@ -105,4 +114,4 @@ Run: `cargo test`
 - Discord embeds (richer formatting) instead of plain content
 - Log rotation
 - Config-driven project rules (beyond folder matching)
-- Approval workflow for blocked execution types
+- Approval workflow (e.g. require human approval before ops execution — no blocked types exist today; the "blocked" Discord label is a dead code path)
