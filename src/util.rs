@@ -1,3 +1,4 @@
+use chrono::{Local, NaiveDate};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -86,6 +87,34 @@ pub fn append_log(
         .open(logfile)?;
     file.write_all(line.as_bytes())?;
     Ok(())
+}
+
+pub fn rotate_logs(logs_dir: &Path, retention_days: u64) {
+    let cutoff = Local::now().date_naive() - chrono::Duration::days(retention_days as i64);
+    let entries = match fs::read_dir(logs_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let date = match NaiveDate::parse_from_str(stem, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        if date < cutoff {
+            println!("Rotating old log: {}", path.display());
+            if let Err(e) = fs::remove_file(&path) {
+                eprintln!("Failed to remove old log {}: {}", path.display(), e);
+            }
+        }
+    }
 }
 
 pub fn move_file(from: &Path, to: &Path) {

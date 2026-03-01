@@ -21,7 +21,8 @@ use crate::policy::load_policy;
 use crate::report::build_report;
 use crate::types::{Envelope, ItemResult};
 use crate::util::{
-    append_log, atomic_write, find_first_inbox_item, move_file, read_first_n_lines, write_envelope,
+    append_log, atomic_write, find_first_inbox_item, move_file, read_first_n_lines, rotate_logs,
+    write_envelope,
 };
 
 // ---------------------------------------------------------------------------
@@ -85,6 +86,12 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
     for dir in [&outbox, &logs, &processed, &failed] {
         fs::create_dir_all(dir).ok();
     }
+
+    let retention_days: u64 = std::env::var("DIGEST_LOG_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    rotate_logs(&logs, retention_days);
 
     let openclaw_cmd =
         std::env::var("OPENCLAW_CMD").unwrap_or_else(|_| "openclaw".to_string());
@@ -927,6 +934,37 @@ mod tests {
         assert_eq!(code, 0);
         let log = fs::read_to_string(&model_log).unwrap();
         assert!(log.contains("claude-opus"), "Expected expensive model:\n{}", log);
+    }
+
+    #[test]
+    fn test_log_rotation_deletes_old_logs() {
+        use crate::util::rotate_logs;
+        let dir = std::env::temp_dir().join(format!("digest-rotation-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let recent = (chrono::Local::now() - chrono::Duration::days(5))
+            .format("%Y-%m-%d")
+            .to_string();
+        let old = (chrono::Local::now() - chrono::Duration::days(60))
+            .format("%Y-%m-%d")
+            .to_string();
+
+        fs::write(dir.join(format!("{}.md", today)), "today").unwrap();
+        fs::write(dir.join(format!("{}.md", recent)), "recent").unwrap();
+        fs::write(dir.join(format!("{}.md", old)), "old").unwrap();
+        // Non-.md file should be ignored
+        fs::write(dir.join("digest-stderr.log"), "legacy").unwrap();
+
+        rotate_logs(&dir, 30);
+
+        assert!(dir.join(format!("{}.md", today)).exists());
+        assert!(dir.join(format!("{}.md", recent)).exists());
+        assert!(!dir.join(format!("{}.md", old)).exists());
+        assert!(dir.join("digest-stderr.log").exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

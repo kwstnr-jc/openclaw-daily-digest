@@ -1,7 +1,8 @@
 # Project Status — 2026-03-01
 
-All 12 prompts are **complete**. The project is a deterministic inbox orchestrator
-that runs on a Mac mini, processing Markdown tasks from a vault inbox.
+All 12 prompts are **complete**, plus post-prompt hardening. The project is a
+deterministic inbox orchestrator that runs on a Mac mini, processing Markdown
+tasks from a vault inbox.
 
 ## Architecture
 
@@ -20,8 +21,8 @@ function — its failure degrades output but never breaks the run.
 
 ## Implementation
 
-- **Rust binary** (sole implementation): split across 10 modules (~2100 lines total,
-  23 tests) with clap CLI (`run --root --dry-run --max-items --no-discord`), serde
+- **Rust binary** (sole implementation): split across 10 modules (~2200 lines total,
+  24 tests) with clap CLI (`run --root --dry-run --max-items --no-discord`), serde
   JSON, reqwest for Discord, atomic writes, `OPENCLAW_CMD` env var for mock injection.
 - **Thin wrapper**: `bin/run-digest.sh` → delegates to Rust binary, errors if not built.
 - Bash reference implementation has been **removed** (prompt 11+).
@@ -30,7 +31,7 @@ function — its failure degrades output but never breaks the run.
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | CLI, `main()`, `run()`, `process_one_item()`, 23 tests (~950 lines) |
+| `src/main.rs` | CLI, `main()`, `run()`, `process_one_item()`, 24 tests (~980 lines) |
 | `src/types.rs` | Shared data structs: Enrichment, Envelope, ItemResult, etc. |
 | `src/policy.rs` | PolicyConfig, `load_policy()`, `select_model()` |
 | `src/classify.rs` | Project + action type classification |
@@ -49,8 +50,8 @@ function — its failure degrades output but never breaks the run.
 
 ## Trigger modes
 
-- **launchd**: `~/Library/LaunchAgents/com.kevinwuestner.digest.plist` — daily 08:00
-- **Discord**: via `bin/digest-now.sh` (OpenClaw executes it)
+- **launchd**: `~/Library/LaunchAgents/com.kevinwuestner.digest.plist` — 3x daily (08:00, 12:00, 18:00)
+- **Discord**: via `bin/digest-now.sh` (OpenClaw `daily-digest` skill)
 - **CLI**: `target/release/openclaw-daily-digest run`
 
 ## Vault paths (runtime, not in repo)
@@ -67,7 +68,7 @@ ROOT=/Users/Shared/agent-vault/Agent
 
 ## Test coverage
 
-23 Rust tests covering:
+24 Rust tests covering:
 - Empty inbox, happy path enriched, OpenClaw failure/invalid JSON → unenriched
 - Dry run, IO failure → Failed, multiple items, max items limit
 - Discord message formatting, Discord token failure (graceful)
@@ -75,6 +76,7 @@ ROOT=/Users/Shared/agent-vault/Agent
 - Tag routing, unclassified note, log entry format
 - Repo-change skip (no git repo), ops execution, ops safety (dangerous task)
 - Policy: cheap/mid/expensive model selection, `#deep` tag, missing policy file
+- Log rotation (deletes old, keeps recent, ignores non-.md)
 
 Run: `cargo test`
 
@@ -90,6 +92,7 @@ Run: `cargo test`
 | `MOCK_OPENCLAW_FAIL` | unset | Set to `1` for mock failure |
 | `MOCK_OPENCLAW_INVALID` | unset | Set to `1` for invalid JSON |
 | `MOCK_OPENCLAW_LOG` | unset | File path to log `--model` args |
+| `DIGEST_LOG_RETENTION_DAYS` | `30` | Days to keep log files before rotation |
 
 ## Prompt completion log
 
@@ -109,9 +112,15 @@ Run: `cargo test`
 | 11 | Autonomous execution (repo-change PRs, ops with safety) | Done |
 | 12 | Discord format cleanup (per-item detail lines) | Done |
 
+## Post-prompt hardening (done)
+
+- Triple launchd schedule (08:00, 12:00, 18:00)
+- OpenClaw `daily-digest` skill for on-demand Discord-triggered runs
+- Log rotation (30-day default, `DIGEST_LOG_RETENTION_DAYS` env var)
+- Dead code removal ("blocked" match arm in discord.rs)
+
 ## What's next (not yet prompted)
 
 - Discord embeds (richer formatting) instead of plain content
-- Log rotation
 - Config-driven project rules (beyond folder matching)
-- Approval workflow (e.g. require human approval before ops execution — no blocked types exist today; the "blocked" Discord label is a dead code path)
+- Approval workflow (e.g. require human approval before ops execution)

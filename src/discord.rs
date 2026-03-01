@@ -15,7 +15,6 @@ pub fn format_discord_message(results: &[ItemResult]) -> String {
         let project = r.project_name.as_deref().unwrap_or("none");
         let detail = match r.exec_status.as_str() {
             "completed" => "completed".to_string(),
-            "blocked" => "blocked".to_string(),
             "failed" => "failed".to_string(),
             "none" => "filed".to_string(),
             "skipped" => "skipped".to_string(),
