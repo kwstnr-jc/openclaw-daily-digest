@@ -5,7 +5,6 @@ use crate::git::{
     call_openclaw_in_dir, create_pull_request, find_repo_dir, git_default_branch,
     git_untracked_files, run_git,
 };
-use crate::policy::{select_model, PolicyConfig};
 use crate::util::{call_openclaw, which_exists};
 
 /// Returns (status, json, output_file, pr_url).
@@ -16,7 +15,6 @@ pub fn execute_handler(
     timestamp: &str,
     stem: &str,
     openclaw_cmd: &str,
-    policy: &Option<PolicyConfig>,
     projects_dir: &Path,
     project_name: Option<&str>,
     project_kind: &str,
@@ -24,19 +22,19 @@ pub fn execute_handler(
 ) -> (String, serde_json::Value, Option<String>, Option<String>) {
     match action_type {
         "research" => {
-            let (s, j, f) = execute_research(task_content, outbox, timestamp, stem, openclaw_cmd, policy);
+            let (s, j, f) = execute_research(task_content, outbox, timestamp, stem, openclaw_cmd);
             (s, j, f, None)
         }
         "question" => {
-            let (s, j, f) = execute_question(task_content, outbox, timestamp, stem, openclaw_cmd, policy);
+            let (s, j, f) = execute_question(task_content, outbox, timestamp, stem, openclaw_cmd);
             (s, j, f, None)
         }
         "repo-change" => execute_repo_change(
-            task_content, outbox, timestamp, stem, openclaw_cmd, policy,
+            task_content, outbox, timestamp, stem, openclaw_cmd,
             projects_dir, project_name, project_kind, enrichment_rendered,
         ),
         "ops" => {
-            let (s, j, f) = execute_ops(task_content, outbox, timestamp, stem, openclaw_cmd, policy);
+            let (s, j, f) = execute_ops(task_content, outbox, timestamp, stem, openclaw_cmd);
             (s, j, f, None)
         }
         _ => {
@@ -48,7 +46,7 @@ pub fn execute_handler(
 
 fn execute_research(
     task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
-    openclaw_cmd: &str, policy: &Option<PolicyConfig>,
+    openclaw_cmd: &str,
 ) -> (String, serde_json::Value, Option<String>) {
     let exec_file = outbox.join(format!("{}-{}.research.md", timestamp, stem));
     println!("Executing research handler...");
@@ -56,15 +54,10 @@ fn execute_research(
         let json = serde_json::json!({"handler":"research","status":"skipped","reason":"OpenClaw not available"});
         return ("skipped".to_string(), json, None);
     }
-    let model = select_model(policy, "research", task_content);
     let mut args = vec![
         "agent".to_string(), "--agent".to_string(), "main".to_string(),
         "--timeout".to_string(), "120".to_string(),
     ];
-    if let Some(ref m) = model {
-        args.push("--model".to_string());
-        args.push(m.clone());
-    }
     let prompt = format!(
         "You are a research assistant. Given the task below, produce a structured research report.\n\n\
          Format your response as markdown with these exact sections:\n\
@@ -91,7 +84,7 @@ fn execute_research(
 
 fn execute_question(
     task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
-    openclaw_cmd: &str, policy: &Option<PolicyConfig>,
+    openclaw_cmd: &str,
 ) -> (String, serde_json::Value, Option<String>) {
     let exec_file = outbox.join(format!("{}-{}.research.md", timestamp, stem));
     println!("Executing question handler...");
@@ -99,15 +92,10 @@ fn execute_question(
         let json = serde_json::json!({"handler":"question","status":"skipped","reason":"OpenClaw not available"});
         return ("skipped".to_string(), json, None);
     }
-    let model = select_model(policy, "question", task_content);
     let mut args = vec![
         "agent".to_string(), "--agent".to_string(), "main".to_string(),
         "--timeout".to_string(), "120".to_string(),
     ];
-    if let Some(ref m) = model {
-        args.push("--model".to_string());
-        args.push(m.clone());
-    }
     let prompt = format!(
         "You are an expert assistant. Given the question below, produce a structured answer.\n\n\
          Format your response as markdown with these exact sections:\n\
@@ -134,7 +122,7 @@ fn execute_question(
 
 fn execute_repo_change(
     task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
-    openclaw_cmd: &str, policy: &Option<PolicyConfig>,
+    openclaw_cmd: &str,
     projects_dir: &Path, project_name: Option<&str>,
     project_kind: &str, enrichment_rendered: &str,
 ) -> (String, serde_json::Value, Option<String>, Option<String>) {
@@ -181,15 +169,10 @@ fn execute_repo_change(
     }
 
     // 3. Execute code change via OpenClaw
-    let model = select_model(policy, "execution", task_content);
     let mut args = vec![
         "agent".to_string(), "--agent".to_string(), "default".to_string(),
         "--timeout".to_string(), "300".to_string(),
     ];
-    if let Some(ref m) = model {
-        args.push("--model".to_string());
-        args.push(m.clone());
-    }
     args.push("--message".to_string());
     args.push(format!(
         "You are working in the repository at {}. Execute the following task.\n\n\
@@ -274,7 +257,7 @@ fn execute_repo_change(
 
 fn execute_ops(
     task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
-    openclaw_cmd: &str, policy: &Option<PolicyConfig>,
+    openclaw_cmd: &str,
 ) -> (String, serde_json::Value, Option<String>) {
     println!("Executing ops handler...");
 
@@ -298,15 +281,10 @@ fn execute_ops(
         }
     }
 
-    let model = select_model(policy, "execution", task_content);
     let mut args = vec![
         "agent".to_string(), "--agent".to_string(), "default".to_string(),
         "--timeout".to_string(), "120".to_string(),
     ];
-    if let Some(ref m) = model {
-        args.push("--model".to_string());
-        args.push(m.clone());
-    }
     args.push("--message".to_string());
     args.push(format!(
         "Execute the following ops task. Only use safe commands \

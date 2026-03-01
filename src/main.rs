@@ -3,7 +3,6 @@ mod discord;
 mod enrich;
 mod execute;
 mod git;
-mod policy;
 mod report;
 mod types;
 mod util;
@@ -17,7 +16,6 @@ use crate::classify::{classify_action_type, classify_project};
 use crate::discord::{format_discord_message, post_to_discord};
 use crate::enrich::enrich;
 use crate::execute::execute_handler;
-use crate::policy::load_policy;
 use crate::report::build_report;
 use crate::types::{Envelope, ItemResult};
 use crate::util::{
@@ -96,9 +94,6 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
     let openclaw_cmd =
         std::env::var("OPENCLAW_CMD").unwrap_or_else(|_| "openclaw".to_string());
 
-    // Load policy
-    let policy = load_policy();
-
     // Process items in a loop
     let mut results: Vec<ItemResult> = Vec::new();
     let limit = if max_items == 0 { usize::MAX } else { max_items };
@@ -124,7 +119,6 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
             &failed,
             &projects_dir,
             &openclaw_cmd,
-            &policy,
             dry_run,
         );
         results.push(result);
@@ -176,7 +170,6 @@ fn process_one_item(
     failed: &Path,
     projects_dir: &Path,
     openclaw_cmd: &str,
-    policy: &Option<policy::PolicyConfig>,
     dry_run: bool,
 ) -> ItemResult {
     let original_name = inbox_file
@@ -211,7 +204,7 @@ fn process_one_item(
 
     // --- Project Classification (Level 1) ---
     let (project_kind, project_name, classification_method, classification_json) =
-        classify_project(&task_content, projects_dir, openclaw_cmd, policy);
+        classify_project(&task_content, projects_dir, openclaw_cmd);
     println!(
         "Project routing: kind={} name={} method={}",
         project_kind,
@@ -237,12 +230,12 @@ fn process_one_item(
 
     // --- Action Type Classification (Level 2) ---
     let (action_type, action_type_method, action_type_json) =
-        classify_action_type(&task_content, openclaw_cmd, policy);
+        classify_action_type(&task_content, openclaw_cmd);
     println!("Action type: {} method={}", action_type, action_type_method);
 
     // --- LLM Enrichment ---
     let (enriched, enrichment_rendered, enrichment_json) =
-        enrich(&task_content, openclaw_cmd, policy);
+        enrich(&task_content, openclaw_cmd);
 
     // --- Execution Handlers ---
     let (exec_result, exec_json, exec_file, pr_url) = execute_handler(
@@ -252,7 +245,6 @@ fn process_one_item(
         &timestamp,
         stem,
         openclaw_cmd,
-        policy,
         projects_dir,
         project_name.as_deref(),
         &project_kind,
@@ -409,13 +401,6 @@ mod tests {
                 "OPENCLAW_CMD",
                 mock_path().to_str().unwrap(),
             );
-            std::env::set_var(
-                "DIGEST_POLICY",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("config/policy.json")
-                    .to_str()
-                    .unwrap(),
-            );
             std::env::remove_var("MOCK_OPENCLAW_FAIL");
             std::env::remove_var("MOCK_OPENCLAW_INVALID");
             std::env::remove_var("MOCK_OPENCLAW_LOG");
@@ -493,13 +478,6 @@ mod tests {
                 mock_path().to_str().unwrap(),
             );
             std::env::set_var("MOCK_OPENCLAW_FAIL", "1");
-            std::env::set_var(
-                "DIGEST_POLICY",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("config/policy.json")
-                    .to_str()
-                    .unwrap(),
-            );
         }
         vault.create_project("openclaw-daily-digest");
         vault.place_inbox(
@@ -615,13 +593,6 @@ mod tests {
         // SAFETY: tests run with --test-threads=1
         unsafe {
             std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
-            std::env::set_var(
-                "DIGEST_POLICY",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("config/policy.json")
-                    .to_str()
-                    .unwrap(),
-            );
             std::env::remove_var("MOCK_OPENCLAW_FAIL");
             std::env::remove_var("MOCK_OPENCLAW_INVALID");
         }
@@ -857,7 +828,6 @@ mod tests {
         unsafe {
             std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
             std::env::set_var("MOCK_OPENCLAW_INVALID", "1");
-            std::env::set_var("DIGEST_POLICY", PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/policy.json").to_str().unwrap());
         }
         vault.place_inbox("invalid.md", "Some random note.");
         let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
@@ -880,60 +850,6 @@ mod tests {
         assert!(content.contains("log-test.md"));
         assert!(content.contains("Processed/"));
         assert!(content.contains("enriched"));
-    }
-
-    #[test]
-    fn test_policy_cheap_model_for_classification() {
-        let vault = TestVault::new();
-        let model_log = vault.root.join("model-log.txt");
-        unsafe {
-            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
-            std::env::set_var("MOCK_OPENCLAW_LOG", model_log.to_str().unwrap());
-            std::env::set_var("DIGEST_POLICY", PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/policy.json").to_str().unwrap());
-            std::env::remove_var("MOCK_OPENCLAW_FAIL");
-            std::env::remove_var("MOCK_OPENCLAW_INVALID");
-        }
-        vault.place_inbox("p1.md", "Pick up groceries.");
-        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
-        assert_eq!(code, 0);
-        let log = fs::read_to_string(&model_log).unwrap();
-        assert!(log.contains("gpt-4o-mini"), "Expected cheap model:\n{}", log);
-    }
-
-    #[test]
-    fn test_policy_mid_model_for_enrichment() {
-        let vault = TestVault::new();
-        let model_log = vault.root.join("model-log.txt");
-        unsafe {
-            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
-            std::env::set_var("MOCK_OPENCLAW_LOG", model_log.to_str().unwrap());
-            std::env::set_var("DIGEST_POLICY", PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/policy.json").to_str().unwrap());
-            std::env::remove_var("MOCK_OPENCLAW_FAIL");
-            std::env::remove_var("MOCK_OPENCLAW_INVALID");
-        }
-        vault.place_inbox("p2.md", "Some task for enrichment.");
-        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
-        assert_eq!(code, 0);
-        let log = fs::read_to_string(&model_log).unwrap();
-        assert!(log.contains("claude-sonnet"), "Expected mid model:\n{}", log);
-    }
-
-    #[test]
-    fn test_policy_deep_tag_uses_expensive() {
-        let vault = TestVault::new();
-        let model_log = vault.root.join("model-log.txt");
-        unsafe {
-            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
-            std::env::set_var("MOCK_OPENCLAW_LOG", model_log.to_str().unwrap());
-            std::env::set_var("DIGEST_POLICY", PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/policy.json").to_str().unwrap());
-            std::env::remove_var("MOCK_OPENCLAW_FAIL");
-            std::env::remove_var("MOCK_OPENCLAW_INVALID");
-        }
-        vault.place_inbox("deep.md", "#deep\n\nAnalyze the full architecture.");
-        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
-        assert_eq!(code, 0);
-        let log = fs::read_to_string(&model_log).unwrap();
-        assert!(log.contains("claude-opus"), "Expected expensive model:\n{}", log);
     }
 
     #[test]
@@ -967,24 +883,4 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn test_policy_missing_file_no_model_args() {
-        let vault = TestVault::new();
-        let model_log = vault.root.join("model-log.txt");
-        unsafe {
-            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
-            std::env::set_var("MOCK_OPENCLAW_LOG", model_log.to_str().unwrap());
-            std::env::set_var("DIGEST_POLICY", "/nonexistent/policy.json");
-            std::env::remove_var("MOCK_OPENCLAW_FAIL");
-            std::env::remove_var("MOCK_OPENCLAW_INVALID");
-        }
-        vault.place_inbox("nopol.md", "Some task.");
-        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
-        assert_eq!(code, 0);
-        if model_log.exists() {
-            let log = fs::read_to_string(&model_log).unwrap();
-            let nonempty: Vec<_> = log.lines().filter(|l| !l.is_empty()).collect();
-            assert!(nonempty.is_empty(), "Expected no model args: {:?}", nonempty);
-        }
-    }
 }

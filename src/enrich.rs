@@ -1,11 +1,9 @@
-use crate::policy::{select_model, PolicyConfig};
 use crate::types::Enrichment;
 use crate::util::{call_openclaw, extract_json, which_exists};
 
 pub fn enrich(
     task_content: &str,
     openclaw_cmd: &str,
-    policy: &Option<PolicyConfig>,
 ) -> (bool, String, serde_json::Value) {
     let fallback = "## Planned Actions\n\
         - (LLM enrichment unavailable — manual review required)\n\n\
@@ -20,7 +18,6 @@ pub fn enrich(
         return (false, fallback, serde_json::Value::Null);
     }
 
-    let model = select_model(policy, "enrichment", task_content);
     let mut args = vec![
         "agent".to_string(),
         "--agent".to_string(),
@@ -28,10 +25,6 @@ pub fn enrich(
         "--timeout".to_string(),
         "120".to_string(),
     ];
-    if let Some(ref m) = model {
-        args.push("--model".to_string());
-        args.push(m.clone());
-    }
 
     let prompt = format!(
         "You are a strict JSON API. Given the task below, return ONLY a single JSON object. \

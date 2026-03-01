@@ -16,21 +16,14 @@ if [[ "${MOCK_OPENCLAW_INVALID:-}" == "1" ]]; then
   exit 0
 fi
 
-# Parse args — capture --message and --model
+# Parse args — capture --message
 MESSAGE=""
-MODEL=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --message) MESSAGE="$2"; shift 2 ;;
-    --model) MODEL="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
-
-# Log model selection for test assertions
-if [[ -n "${MOCK_OPENCLAW_LOG:-}" ]]; then
-  echo "$MODEL" >> "$MOCK_OPENCLAW_LOG"
-fi
 
 # Detect which type of call this is based on prompt keywords
 if echo "$MESSAGE" | grep -q "Classify the action type"; then

@@ -21,8 +21,8 @@ function — its failure degrades output but never breaks the run.
 
 ## Implementation
 
-- **Rust binary** (sole implementation): split across 10 modules (~2200 lines total,
-  24 tests) with clap CLI (`run --root --dry-run --max-items --no-discord`), serde
+- **Rust binary** (sole implementation): split across 9 modules (~1900 lines total,
+  20 tests) with clap CLI (`run --root --dry-run --max-items --no-discord`), serde
   JSON, reqwest for Discord, atomic writes, `OPENCLAW_CMD` env var for mock injection.
 - **Thin wrapper**: `bin/run-digest.sh` → delegates to Rust binary, errors if not built.
 - Bash reference implementation has been **removed** (prompt 11+).
@@ -31,9 +31,8 @@ function — its failure degrades output but never breaks the run.
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | CLI, `main()`, `run()`, `process_one_item()`, 24 tests (~980 lines) |
+| `src/main.rs` | CLI, `main()`, `run()`, `process_one_item()`, 20 tests (~830 lines) |
 | `src/types.rs` | Shared data structs: Enrichment, Envelope, ItemResult, etc. |
-| `src/policy.rs` | PolicyConfig, `load_policy()`, `select_model()` |
 | `src/classify.rs` | Project + action type classification |
 | `src/enrich.rs` | LLM enrichment |
 | `src/execute.rs` | Execution handlers (research, question, repo-change, ops) |
@@ -43,8 +42,7 @@ function — its failure degrades output but never breaks the run.
 | `src/util.rs` | IO helpers: `call_openclaw()`, `extract_json()`, `atomic_write()`, etc. |
 | `bin/run-digest.sh` | Wrapper (delegates to Rust binary) |
 | `bin/digest-now.sh` | On-demand trigger for Discord/manual |
-| `config/policy.json` | Model tiers: cheap/mid/expensive |
-| `tests/helpers/mock-openclaw.sh` | Mock with FAIL/INVALID/LOG modes |
+| `tests/helpers/mock-openclaw.sh` | Mock with FAIL/INVALID modes |
 | `tests/fixtures/` | 7 test inbox items |
 | `.cargo/config.toml` | Enforces single-threaded tests |
 
@@ -68,14 +66,13 @@ ROOT=/Users/Shared/agent-vault/Agent
 
 ## Test coverage
 
-24 Rust tests covering:
+20 Rust tests covering:
 - Empty inbox, happy path enriched, OpenClaw failure/invalid JSON → unenriched
 - Dry run, IO failure → Failed, multiple items, max items limit
 - Discord message formatting, Discord token failure (graceful)
 - New project creation, research output, question handler
 - Tag routing, unclassified note, log entry format
 - Repo-change skip (no git repo), ops execution, ops safety (dangerous task)
-- Policy: cheap/mid/expensive model selection, `#deep` tag, missing policy file
 - Log rotation (deletes old, keeps recent, ignores non-.md)
 
 Run: `cargo test`
@@ -85,13 +82,11 @@ Run: `cargo test`
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `DIGEST_ROOT` | `/Users/Shared/agent-vault/Agent` | Override vault root |
-| `DIGEST_POLICY` | `config/policy.json` (repo-relative) | Override policy file |
 | `OPENCLAW_CMD` | `openclaw` | Override OpenClaw binary (used by tests) |
 | `DISCORD_TOKEN_FILE` | `~/.digest-bot-token` | Bot token file path |
 | `DISCORD_CHANNEL_ID` | `1477340656350396668` | Target Discord channel |
 | `MOCK_OPENCLAW_FAIL` | unset | Set to `1` for mock failure |
 | `MOCK_OPENCLAW_INVALID` | unset | Set to `1` for invalid JSON |
-| `MOCK_OPENCLAW_LOG` | unset | File path to log `--model` args |
 | `DIGEST_LOG_RETENTION_DAYS` | `30` | Days to keep log files before rotation |
 
 ## Prompt completion log
@@ -104,7 +99,7 @@ Run: `cargo test`
 | 03 | Action type classification | Done |
 | 04 | Execution handlers | Done |
 | 05 | Testing harness (bats-core) | Done |
-| 06 | Model selection policy | Done |
+| 06 | Model selection policy | Removed — OpenClaw CLI has no `--model` flag |
 | 07 | Rust rewrite | Done |
 | 08 | Dual trigger (launchd + Discord) | Done |
 | 09 | Loop processing (all inbox items per run) | Done |
@@ -118,6 +113,9 @@ Run: `cargo test`
 - OpenClaw `daily-digest` skill for on-demand Discord-triggered runs
 - Log rotation (30-day default, `DIGEST_LOG_RETENTION_DAYS` env var)
 - Dead code removal ("blocked" match arm in discord.rs)
+- Removed `policy.rs`, `config/policy.json`, and all `--model` flag passing — OpenClaw CLI
+  doesn't support `--model`; model selection is configured on the gateway agent. Can be
+  restored if OpenClaw adds per-call model selection (see git history, commit before this one)
 
 ## What's next (not yet prompted)
 

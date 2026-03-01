@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-use crate::policy::{select_model, PolicyConfig};
 use crate::types::{ActionTypeClassification, ProjectClassification};
 use crate::util::{call_openclaw, extract_json, which_exists};
 
@@ -9,7 +8,6 @@ pub fn classify_project(
     task_content: &str,
     projects_dir: &Path,
     openclaw_cmd: &str,
-    policy: &Option<PolicyConfig>,
 ) -> (String, Option<String>, String, serde_json::Value) {
     // Rule 1: Explicit "Project: <name>" line
     for line in task_content.lines() {
@@ -92,18 +90,13 @@ pub fn classify_project(
 
     // Rule 4: AI classification
     if which_exists(openclaw_cmd) {
-        let model = select_model(policy, "classification", task_content);
-        let mut args = vec![
+        let args_base = vec![
             "agent".to_string(),
             "--agent".to_string(),
             "main".to_string(),
             "--timeout".to_string(),
             "120".to_string(),
         ];
-        if let Some(ref m) = model {
-            args.push("--model".to_string());
-            args.push(m.clone());
-        }
 
         let existing_projects = fs::read_dir(projects_dir)
             .ok()
@@ -130,6 +123,7 @@ pub fn classify_project(
              Task:\n{}",
             existing_projects, task_content
         );
+        let mut args = args_base;
         args.push("--message".to_string());
         args.push(prompt);
 
@@ -165,7 +159,6 @@ pub fn classify_project(
 pub fn classify_action_type(
     task_content: &str,
     openclaw_cmd: &str,
-    policy: &Option<PolicyConfig>,
 ) -> (String, String, serde_json::Value) {
     let task_lower = task_content.to_lowercase();
 
@@ -196,7 +189,6 @@ pub fn classify_action_type(
 
     // AI fallback
     if which_exists(openclaw_cmd) {
-        let model = select_model(policy, "action_type", task_content);
         let mut args = vec![
             "agent".to_string(),
             "--agent".to_string(),
@@ -204,10 +196,6 @@ pub fn classify_action_type(
             "--timeout".to_string(),
             "120".to_string(),
         ];
-        if let Some(ref m) = model {
-            args.push("--model".to_string());
-            args.push(m.clone());
-        }
 
         let prompt = format!(
             "You are a strict JSON API. Classify the action type for the following task.\n\n\
