@@ -341,6 +341,110 @@ if [[ "$ENRICHED" == "false" ]]; then
   echo "Enrichment unavailable or invalid, using fallback."
 fi
 
+# --- Execution Handlers ---
+EXECUTION_RESULT=""
+EXECUTION_JSON="{}"
+EXECUTION_FILE=""
+
+case "$ACTION_TYPE" in
+  research)
+    EXECUTION_FILE="$OUTBOX/${TIMESTAMP}-${STEM}.research.md"
+    echo "Executing research handler..."
+    if command -v openclaw &>/dev/null; then
+      RESEARCH_RAW="$(openclaw agent \
+        --agent main \
+        --timeout "$ENRICHMENT_TIMEOUT" \
+        --message "You are a research assistant. Given the task below, produce a structured research report.
+
+Format your response as markdown with these exact sections:
+## Summary
+(2-3 sentence overview)
+
+## Findings
+(bulleted list of key findings)
+
+## Sources
+(bulleted list — use placeholder URLs for now)
+
+## Next Steps
+(bulleted list of recommended follow-up actions)
+
+Task:
+$TASK_CONTENT" 2>/dev/null)" || true
+      if [[ -n "$RESEARCH_RAW" ]]; then
+        echo "$RESEARCH_RAW" > "$EXECUTION_FILE"
+        EXECUTION_RESULT="completed"
+        EXECUTION_JSON="{\"handler\":\"research\",\"status\":\"completed\",\"output_file\":\"$(basename "$EXECUTION_FILE")\"}"
+        echo "Research report written: $EXECUTION_FILE"
+      else
+        EXECUTION_RESULT="failed"
+        EXECUTION_JSON="{\"handler\":\"research\",\"status\":\"failed\",\"reason\":\"OpenClaw returned empty response\"}"
+      fi
+    else
+      EXECUTION_RESULT="skipped"
+      EXECUTION_JSON="{\"handler\":\"research\",\"status\":\"skipped\",\"reason\":\"OpenClaw not available\"}"
+    fi
+    ;;
+
+  question)
+    EXECUTION_FILE="$OUTBOX/${TIMESTAMP}-${STEM}.research.md"
+    echo "Executing question handler..."
+    if command -v openclaw &>/dev/null; then
+      ANSWER_RAW="$(openclaw agent \
+        --agent main \
+        --timeout "$ENRICHMENT_TIMEOUT" \
+        --message "You are an expert assistant. Given the question below, produce a structured answer.
+
+Format your response as markdown with these exact sections:
+## Answer
+(clear, direct answer to the question)
+
+## Details
+(supporting explanation with bullet points)
+
+## Sources
+(bulleted list — use placeholder URLs for now)
+
+## Follow-up Questions
+(bulleted list of related questions worth exploring)
+
+Question:
+$TASK_CONTENT" 2>/dev/null)" || true
+      if [[ -n "$ANSWER_RAW" ]]; then
+        echo "$ANSWER_RAW" > "$EXECUTION_FILE"
+        EXECUTION_RESULT="completed"
+        EXECUTION_JSON="{\"handler\":\"question\",\"status\":\"completed\",\"output_file\":\"$(basename "$EXECUTION_FILE")\"}"
+        echo "Answer report written: $EXECUTION_FILE"
+      else
+        EXECUTION_RESULT="failed"
+        EXECUTION_JSON="{\"handler\":\"question\",\"status\":\"failed\",\"reason\":\"OpenClaw returned empty response\"}"
+      fi
+    else
+      EXECUTION_RESULT="skipped"
+      EXECUTION_JSON="{\"handler\":\"question\",\"status\":\"skipped\",\"reason\":\"OpenClaw not available\"}"
+    fi
+    ;;
+
+  repo-change)
+    EXECUTION_RESULT="blocked"
+    EXECUTION_JSON="{\"handler\":\"repo-change\",\"status\":\"blocked\",\"reason\":\"Execution blocked: requires approval\"}"
+    echo "Execution blocked: repo-change requires approval"
+    ;;
+
+  ops)
+    EXECUTION_RESULT="blocked"
+    EXECUTION_JSON="{\"handler\":\"ops\",\"status\":\"blocked\",\"reason\":\"Execution blocked: requires approval\"}"
+    echo "Execution blocked: ops requires approval"
+    ;;
+
+  note|*)
+    EXECUTION_RESULT="none"
+    EXECUTION_JSON="{\"handler\":\"note\",\"status\":\"none\",\"reason\":\"No execution required for notes\"}"
+    ;;
+esac
+
+echo "Execution: $EXECUTION_RESULT"
+
 # --- Envelope writer function ---
 _write_envelope() {
   local status="$1"
@@ -362,7 +466,7 @@ _write_envelope() {
   "action_type": ${ACTION_TYPE_JSON},
   "planning": null,
   "enrichment": ${enrichment_json},
-  "execution": {},
+  "execution": ${EXECUTION_JSON},
   "status": "${status}"
 }
 ENVEOF
@@ -389,6 +493,16 @@ if ! {
   echo "" >> "$REPORT"
   echo "- **Type:** $ACTION_TYPE" >> "$REPORT"
   echo "- **Method:** $ACTION_TYPE_METHOD" >> "$REPORT"
+  echo "" >> "$REPORT"
+
+  # Append execution status section
+  echo "## Execution" >> "$REPORT"
+  echo "" >> "$REPORT"
+  echo "- **Handler:** $ACTION_TYPE" >> "$REPORT"
+  echo "- **Status:** $EXECUTION_RESULT" >> "$REPORT"
+  if [[ -n "$EXECUTION_FILE" && -f "$EXECUTION_FILE" ]]; then
+    echo "- **Output:** $(basename "$EXECUTION_FILE")" >> "$REPORT"
+  fi
   echo "" >> "$REPORT"
 
   # Append rendered enrichment
