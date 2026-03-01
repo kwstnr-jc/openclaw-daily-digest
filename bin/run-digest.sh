@@ -43,6 +43,139 @@ TODAY="$(date '+%Y-%m-%d')"
 # Read inbox content (first 200 lines)
 TASK_CONTENT="$(head -n 200 "$INBOX_FILE")"
 
+# --- Project Classification (Level 1) ---
+PROJECTS_DIR="$ROOT/Projects"
+PROJECT_KIND="none"
+PROJECT_NAME=""
+CLASSIFICATION_METHOD=""
+CLASSIFICATION_JSON="null"
+
+# Rule 1: Explicit "Project: <name>" line
+EXPLICIT_PROJECT="$(echo "$TASK_CONTENT" | grep -iE '^Project:[[:space:]]+' | head -n 1 | sed 's/^[Pp]roject:[[:space:]]*//' | xargs || true)"
+if [[ -n "$EXPLICIT_PROJECT" ]]; then
+  PROJECT_NAME="$EXPLICIT_PROJECT"
+  CLASSIFICATION_METHOD="explicit-line"
+  if [[ -d "$PROJECTS_DIR/$PROJECT_NAME" ]]; then
+    PROJECT_KIND="existing"
+  else
+    PROJECT_KIND="new"
+  fi
+fi
+
+# Rule 2: #project/<name> tag
+if [[ -z "$PROJECT_NAME" ]]; then
+  TAG_PROJECT="$(echo "$TASK_CONTENT" | grep -oE '#project/[A-Za-z0-9_-]+' | head -n 1 | sed 's|^#project/||' || true)"
+  if [[ -n "$TAG_PROJECT" ]]; then
+    PROJECT_NAME="$TAG_PROJECT"
+    CLASSIFICATION_METHOD="tag"
+    if [[ -d "$PROJECTS_DIR/$PROJECT_NAME" ]]; then
+      PROJECT_KIND="existing"
+    else
+      PROJECT_KIND="new"
+    fi
+  fi
+fi
+
+# Rule 3: Case-insensitive substring match against existing project folder names
+if [[ -z "$PROJECT_NAME" && -d "$PROJECTS_DIR" ]]; then
+  TASK_LOWER="$(echo "$TASK_CONTENT" | tr '[:upper:]' '[:lower:]')"
+  for proj_dir in "$PROJECTS_DIR"/*/; do
+    [[ -d "$proj_dir" ]] || continue
+    proj_name="$(basename "$proj_dir")"
+    proj_lower="$(echo "$proj_name" | tr '[:upper:]' '[:lower:]')"
+    if echo "$TASK_LOWER" | grep -qF "$proj_lower" 2>/dev/null; then
+      PROJECT_NAME="$proj_name"
+      PROJECT_KIND="existing"
+      CLASSIFICATION_METHOD="folder-match"
+      break
+    fi
+  done
+fi
+
+# Rule 4: AI-assisted classification via OpenClaw
+if [[ -z "$PROJECT_NAME" ]] && command -v openclaw &>/dev/null && [[ "$HAS_JQ" == "true" ]]; then
+  echo "Calling OpenClaw for project classification..."
+  CLASSIFY_RAW="$(openclaw agent \
+    --agent main \
+    --timeout "$ENRICHMENT_TIMEOUT" \
+    --message "You are a strict JSON API. Classify the following task into a project.
+
+Return ONLY a JSON object:
+{
+  \"project\": { \"kind\": \"existing\"|\"new\"|\"none\", \"name\": \"string or null\" },
+  \"confidence\": 0.0,
+  \"rationale\": \"string\"
+}
+
+Existing projects: $(ls "$PROJECTS_DIR" 2>/dev/null | tr '\n' ', ')
+
+Rules:
+- kind=existing if the task clearly belongs to one of the existing projects.
+- kind=new if the task requires a new project that doesn't exist yet. Provide a kebab-case name.
+- kind=none if it's personal admin, a question, or doesn't warrant a project.
+- Output MUST be valid JSON. Nothing else.
+
+Task:
+$TASK_CONTENT" 2>/dev/null)" || true
+
+  # Strip markdown fences
+  CLASSIFY_CLEAN="$(echo "$CLASSIFY_RAW" | sed -n '/^[[:space:]]*{/,/}[[:space:]]*$/p')"
+  [[ -z "$CLASSIFY_CLEAN" ]] && CLASSIFY_CLEAN="$CLASSIFY_RAW"
+
+  if echo "$CLASSIFY_CLEAN" | jq empty 2>/dev/null; then
+    AI_KIND="$(echo "$CLASSIFY_CLEAN" | jq -r '.project.kind // "none"')"
+    AI_NAME="$(echo "$CLASSIFY_CLEAN" | jq -r '.project.name // empty')"
+    if [[ "$AI_KIND" == "existing" || "$AI_KIND" == "new" ]] && [[ -n "$AI_NAME" ]]; then
+      PROJECT_KIND="$AI_KIND"
+      PROJECT_NAME="$AI_NAME"
+      CLASSIFICATION_METHOD="ai"
+      CLASSIFICATION_JSON="$(echo "$CLASSIFY_CLEAN" | jq '.')"
+    elif [[ "$AI_KIND" == "none" ]]; then
+      PROJECT_KIND="none"
+      CLASSIFICATION_METHOD="ai"
+      CLASSIFICATION_JSON="$(echo "$CLASSIFY_CLEAN" | jq '.')"
+    fi
+    echo "AI classification: kind=$PROJECT_KIND name=$PROJECT_NAME"
+  else
+    echo "AI classification JSON invalid, skipping."
+  fi
+fi
+
+# Default: unclassified
+if [[ -z "$CLASSIFICATION_METHOD" ]]; then
+  CLASSIFICATION_METHOD="default"
+fi
+
+# Build classification JSON for envelope
+if [[ "$CLASSIFICATION_JSON" == "null" ]]; then
+  if [[ -n "$PROJECT_NAME" ]]; then
+    CLASSIFICATION_JSON="{\"project\":{\"kind\":\"$PROJECT_KIND\",\"name\":\"$PROJECT_NAME\"},\"confidence\":1.0,\"rationale\":\"Matched via $CLASSIFICATION_METHOD\"}"
+  else
+    CLASSIFICATION_JSON="{\"project\":{\"kind\":\"none\",\"name\":null},\"confidence\":1.0,\"rationale\":\"No project match ($CLASSIFICATION_METHOD)\"}"
+  fi
+fi
+
+echo "Project routing: kind=$PROJECT_KIND name=${PROJECT_NAME:-<none>} method=$CLASSIFICATION_METHOD"
+
+# Create new project directory if classified as "new"
+if [[ "$PROJECT_KIND" == "new" && -n "$PROJECT_NAME" ]]; then
+  NEW_PROJECT_DIR="$PROJECTS_DIR/$PROJECT_NAME"
+  if [[ ! -d "$NEW_PROJECT_DIR" ]]; then
+    mkdir -p "$NEW_PROJECT_DIR/Inbox"
+    cat > "$NEW_PROJECT_DIR/README.md" <<PROJEOF
+# $PROJECT_NAME
+
+Created: $TODAY
+Source: $ORIGINAL_NAME
+
+## Description
+
+(Auto-created by inbox orchestrator. Update this with project details.)
+PROJEOF
+    echo "Created new project: $NEW_PROJECT_DIR"
+  fi
+fi
+
 # --- LLM Enrichment via OpenClaw CLI (strict JSON) ---
 ENRICHED=false
 RAW_JSON=""
@@ -140,7 +273,7 @@ _write_envelope() {
   "timestamp": "${TIMESTAMP}",
   "source_file": "${ORIGINAL_NAME}",
   "task_text": ${escaped_task},
-  "classification": null,
+  "classification": ${CLASSIFICATION_JSON},
   "planning": null,
   "enrichment": ${enrichment_json},
   "execution": {},
@@ -154,8 +287,18 @@ if ! {
   # Write original content
   echo "$TASK_CONTENT" > "$REPORT"
 
-  # Append rendered enrichment
+  # Append project routing section
   printf '\n---\n\n' >> "$REPORT"
+  echo "## Project Routing" >> "$REPORT"
+  echo "" >> "$REPORT"
+  echo "- **Kind:** $PROJECT_KIND" >> "$REPORT"
+  if [[ -n "$PROJECT_NAME" ]]; then
+    echo "- **Project:** $PROJECT_NAME" >> "$REPORT"
+  fi
+  echo "- **Method:** $CLASSIFICATION_METHOD" >> "$REPORT"
+  echo "" >> "$REPORT"
+
+  # Append rendered enrichment
   echo "$RENDERED_ENRICHMENT" >> "$REPORT"
 
   # Append raw JSON audit block (only if we got valid JSON)
