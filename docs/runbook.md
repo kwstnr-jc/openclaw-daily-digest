@@ -2,44 +2,101 @@
 
 ## What this does
 
-`bin/run-digest.sh` is a deterministic shell script that:
+The inbox orchestrator is a deterministic state machine that:
 
 1. Reads the first `*.md` file (alphabetically) from the vault Inbox.
 2. If no items exist, prints "No inbox items." and exits 0.
 3. Otherwise:
-   - Creates a digest report in Outbox named `YYYY-MM-DD_HHMM-<name>-digest.md`.
-   - Copies the first 200 lines of the inbox item into the report.
-   - Appends `## Planned Actions` and `## Next Step` placeholder sections.
-   - Appends a timestamped log line to `Logs/YYYY-MM-DD.md`.
-4. Exits 0 on success.
+   - **Classifies** the item: project routing (explicit line, tag, folder match, or AI) and action type (keyword overrides or AI).
+   - **Enriches** via OpenClaw: planned actions, clarifying questions, next step.
+   - **Executes** handler: research/question produce reports; repo-change/ops are blocked pending approval; notes are pass-through.
+   - Writes a digest report to Outbox: `YYYY-MM-DD_HHMM-<name>-digest.md`
+   - Writes an envelope: `YYYY-MM-DD_HHMM-<name>.envelope.json`
+   - Appends a log line to `Logs/YYYY-MM-DD.md`
+   - Moves the inbox item to `Processed/` (or `Failed/` on IO error)
+4. Exits 0 on success (including unenriched fallback).
+
+## Implementation
+
+The orchestrator has two implementations with identical behavior:
+
+- **Rust binary** (primary): `target/release/openclaw-daily-digest run`
+- **Bash reference** (fallback): `bin/run-digest-bash.sh`
+
+`bin/run-digest.sh` is a thin wrapper that delegates to the Rust binary, falling back to bash if the binary is not built.
 
 ## How to run
 
 ```bash
-cd ~/work/openclaw-daily-digest
+# Via wrapper (preferred)
 bin/run-digest.sh
+
+# Via Rust binary directly
+cargo run --release -- run
+
+# With overrides
+cargo run --release -- run --root /tmp/test-vault --dry-run
+
+# On-demand trigger
+bin/digest-now.sh
 ```
 
-## How to test locally
+## Trigger modes
+
+### Scheduled (launchd)
+
+The orchestrator runs daily at 08:00 via launchd:
+
+```
+~/Library/LaunchAgents/com.kevinwuestner.digest.plist
+```
+
+Management:
 
 ```bash
-# 1. Create a test inbox item
-cat > /Users/Shared/agent-vault/Agent/Inbox/test-item.md <<'EOF'
-# Test Item
-This is a test brief for the digest runner.
-EOF
+# Check status
+launchctl print gui/$(id -u)/com.kevinwuestner.digest
 
-# 2. Run the script
-bin/run-digest.sh
+# Manually trigger now
+launchctl kickstart gui/$(id -u)/com.kevinwuestner.digest
 
-# 3. Verify the digest report was created
-ls -la /Users/Shared/agent-vault/Agent/Outbox/
+# Unload
+launchctl bootout gui/$(id -u)/com.kevinwuestner.digest
 
-# 4. Verify the log entry
-cat /Users/Shared/agent-vault/Agent/Logs/$(date +%F).md
+# Reload after plist changes
+launchctl bootout gui/$(id -u)/com.kevinwuestner.digest
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.kevinwuestner.digest.plist
+```
 
-# 5. Clean up test data
-rm /Users/Shared/agent-vault/Agent/Inbox/test-item.md
+Logs: `~/Library/Logs/openclaw-digest.log`
+
+### On-demand (Discord)
+
+To trigger manually from Discord, configure OpenClaw to execute:
+
+```
+~/work/openclaw-daily-digest/bin/digest-now.sh
+```
+
+when receiving a "digest now" command.
+
+The orchestrator is the single source of truth for processing logic. Both Discord and launchd call the same Rust binary entrypoint — no duplicate logic.
+
+### Safety and idempotency
+
+- If no inbox items exist, the runner exits 0 with no side effects.
+- Multiple rapid invocations do not corrupt state: each run processes exactly one item and moves it atomically.
+- Log file is appended to safely (no truncation).
+- Writes use atomic temp-file-then-rename to prevent partial output.
+
+## How to test
+
+```bash
+# Run bash integration tests (16 tests)
+tests/run-tests.sh
+
+# Run Rust unit tests (5 tests)
+cargo test -- --test-threads=1
 ```
 
 ## Vault paths
@@ -47,44 +104,25 @@ rm /Users/Shared/agent-vault/Agent/Inbox/test-item.md
 | Path | Purpose |
 |------|---------|
 | `$ROOT/Inbox/` | Source items. The runner reads `*.md` files here. |
-| `$ROOT/Outbox/` | Generated digest reports. |
+| `$ROOT/Inbox/Processed/` | Successfully processed items. |
+| `$ROOT/Inbox/Failed/` | Items that failed due to IO errors. |
+| `$ROOT/Outbox/` | Generated digest reports and envelopes. |
 | `$ROOT/Logs/YYYY-MM-DD.md` | Daily log. One line per digest run. |
-| `$ROOT/Inbox/Processed/` | (Phase 2) Successfully processed items move here. |
-| `$ROOT/Inbox/Failed/` | (Phase 2) Items that fail processing move here. |
+| `$ROOT/Projects/` | Project directories for routing. |
 
-Where `ROOT=/Users/Shared/agent-vault/Agent`.
+Where `ROOT=/Users/Shared/agent-vault/Agent` (override with `--root` or `DIGEST_ROOT` env var).
 
-## Phased extension plan
+## Model selection policy
 
-### Phase 2 — Processing pipeline (next)
+`config/policy.json` defines three model tiers:
 
-- After generating the report, move the inbox item to `Processed/`.
-- On error, move to `Failed/` and log the failure.
-- Add structured frontmatter to the digest report (date, source, status).
-- Still fully deterministic — no LLM calls.
+| Tier | Model | Used for |
+|------|-------|----------|
+| cheap | gpt-4o-mini | classification, action_type |
+| mid | claude-sonnet | enrichment, research, question |
+| expensive | claude-opus | deep analysis (#deep tag) |
 
-### Phase 3 — LLM enrichment
-
-- Replace placeholder sections with real content via OpenRouter API.
-- Generate: Planned Actions, clarifying questions, concrete Next Step.
-- Keep the deterministic path as a fallback (offline mode).
-
-### Phase 4 — Always-on cadence
-
-- Add a launchd plist (or cron entry) to trigger `bin/run-digest.sh` on a
-  schedule (e.g., daily at 08:00).
-- Log rotation if needed.
-
-### Phase 5 — Repo-change items (optional)
-
-- For inbox items classified as code changes: create a feature branch, apply
-  changes, open a draft PR.
-- Requires `gh` CLI and repo write access.
-
-### Phase 6 — Discord posting (optional)
-
-- Post a summary of each digest run to a Discord channel via webhook.
-- Requires a webhook URL in `.env`.
+Override with `DIGEST_POLICY` env var to point to a different policy file.
 
 ## Configuration
 
@@ -94,13 +132,12 @@ Copy `config/example.env` to `.env` and fill in values:
 cp config/example.env .env
 ```
 
-Currently only `VAULT_ROOT` is used. Other variables are reserved for future
-phases.
-
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | "No inbox items." | No `*.md` files in Inbox | Add a `.md` file to the Inbox |
 | Permission denied | Script not executable | `chmod +x bin/run-digest.sh` |
-| Outbox empty after run | Script errored silently | Check `set -euo pipefail` output |
+| "Rust binary not found" | Not built yet | `cargo build --release` |
+| Unenriched output | OpenClaw unavailable or returned invalid JSON | Check `openclaw` is on PATH |
+| launchd not firing | Plist not loaded | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.kevinwuestner.digest.plist` |
