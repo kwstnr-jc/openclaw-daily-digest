@@ -22,10 +22,11 @@ Processed 3 items:
 Enriched: 2 | Unenriched: 1 | Failed: 0
 ```
 
-Fixes needed:
+Fixes applied:
 1. ~~Bash $'...' syntax for real newlines~~ (DONE)
 2. ~~Rebuild release binary so Rust path is used~~ (DONE)
-3. Verify Discord renders the message cleanly with actual newlines and markdown
-4. Consider using Discord embeds (richer formatting) instead of plain content in a future iteration
+3. ~~Bash script removed entirely — Rust binary is sole implementation~~ (DONE)
+4. ~~Updated format_discord_message() to use per-item detail lines with markdown dashes~~ (DONE)
+5. Consider using Discord embeds (richer formatting) instead of plain content in a future iteration
 
-Status: Partially complete — newline fix applied, release binary rebuilt. Verify on next run.
+Status: Complete. Format matches desired spec. Verify on next run.

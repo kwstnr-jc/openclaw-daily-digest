@@ -1421,31 +1421,31 @@ fn which_exists(cmd: &str) -> bool {
 
 fn format_discord_message(results: &[ItemResult]) -> String {
     let now = Local::now();
-    let mut msg = format!("**Daily Digest — {}**\n\n", now.format("%Y-%m-%d %H:%M"));
+    let mut msg = format!(
+        "**Daily Digest** \u{2014} {}\n\nProcessed {} items:\n",
+        now.format("%Y-%m-%d %H:%M"),
+        results.len()
+    );
 
-    msg.push_str(&format!("Processed {} items:\n", results.len()));
     for r in results {
-        let project = r
-            .project_name
-            .as_deref()
-            .unwrap_or("none");
+        let project = r.project_name.as_deref().unwrap_or("none");
         let detail = match r.exec_status.as_str() {
-            "completed" => "completed",
-            "blocked" => "blocked",
-            "failed" => "failed",
-            "none" => "filed",
-            "skipped" => "skipped",
-            "no-op" => "no changes",
-            "pushed" => "pushed (PR failed)",
-            _ => &r.exec_status,
+            "completed" => "completed".to_string(),
+            "blocked" => "blocked".to_string(),
+            "failed" => "failed".to_string(),
+            "none" => "filed".to_string(),
+            "skipped" => "skipped".to_string(),
+            "no-op" => "no changes".to_string(),
+            "pushed" => "pushed (PR failed)".to_string(),
+            other => other.to_string(),
         };
-        let pr_suffix = match &r.pr_url {
-            Some(url) => format!(" \u{2014} PR: {}", url),
-            None => String::new(),
+        let suffix = match &r.pr_url {
+            Some(url) => format!("PR opened: <{}>", url),
+            None => detail,
         };
         msg.push_str(&format!(
-            "\u{2022} `{}` \u{2192} **{}** ({}) \u{2014} {}{}\n",
-            r.source_file, project, r.action_type, detail, pr_suffix
+            "- `{}` \u{2192} **{}** ({}) \u{2014} {}\n",
+            r.source_file, project, r.action_type, suffix
         ));
     }
 
@@ -1848,20 +1848,15 @@ mod tests {
 
         let msg = format_discord_message(&results);
 
-        assert!(msg.contains("**Daily Digest"));
+        // Header
+        assert!(msg.contains("**Daily Digest** \u{2014}"));
         assert!(msg.contains("Processed 3 items:"));
-        assert!(msg.contains("`fix-bug.md`"));
-        assert!(msg.contains("**my-project**"));
-        assert!(msg.contains("(repo-change)"));
-        assert!(msg.contains("PR: https://github.com/org/repo/pull/42"));
-        assert!(msg.contains("`research-ai.md`"));
-        assert!(msg.contains("**none**"));
-        assert!(msg.contains("completed"));
-        assert!(msg.contains("`grocery-list.md`"));
-        assert!(msg.contains("filed"));
-        assert!(msg.contains("Enriched: 2"));
-        assert!(msg.contains("Unenriched: 1"));
-        assert!(msg.contains("Failed: 0"));
+        // Per-item lines use markdown dash, not bullet
+        assert!(msg.contains("- `fix-bug.md` \u{2192} **my-project** (repo-change) \u{2014} PR opened: <https://github.com/org/repo/pull/42>"));
+        assert!(msg.contains("- `research-ai.md` \u{2192} **none** (research) \u{2014} completed"));
+        assert!(msg.contains("- `grocery-list.md` \u{2192} **none** (note) \u{2014} filed"));
+        // Summary
+        assert!(msg.contains("Enriched: 2 | Unenriched: 1 | Failed: 0"));
     }
 
     #[test]
