@@ -176,6 +176,91 @@ PROJEOF
   fi
 fi
 
+# --- Action Type Classification (Level 2) ---
+ACTION_TYPE=""
+ACTION_TYPE_METHOD=""
+ACTION_TYPE_JSON="null"
+TASK_LOWER="$(echo "$TASK_CONTENT" | tr '[:upper:]' '[:lower:]')"
+
+# Deterministic keyword overrides
+if echo "$TASK_LOWER" | grep -qE '\b(fix|implement|add flag|refactor|pr)\b' 2>/dev/null; then
+  ACTION_TYPE="repo-change"
+  ACTION_TYPE_METHOD="keyword"
+elif echo "$TASK_LOWER" | grep -qE '\b(compare|research|find out|summarize)\b' 2>/dev/null; then
+  ACTION_TYPE="research"
+  ACTION_TYPE_METHOD="keyword"
+elif echo "$TASK_LOWER" | grep -qE '\b(install|brew|launchctl|tailscale)\b' 2>/dev/null; then
+  ACTION_TYPE="ops"
+  ACTION_TYPE_METHOD="keyword"
+elif echo "$TASK_CONTENT" | grep -qE '\?\s*$' 2>/dev/null; then
+  ACTION_TYPE="question"
+  ACTION_TYPE_METHOD="keyword"
+fi
+
+# AI fallback if no deterministic match
+if [[ -z "$ACTION_TYPE" ]] && command -v openclaw &>/dev/null && [[ "$HAS_JQ" == "true" ]]; then
+  echo "Calling OpenClaw for action type classification..."
+  ACTION_RAW="$(openclaw agent \
+    --agent main \
+    --timeout "$ENRICHMENT_TIMEOUT" \
+    --message "You are a strict JSON API. Classify the action type for the following task.
+
+Return ONLY a JSON object:
+{
+  \"action_type\": \"repo-change\"|\"research\"|\"ops\"|\"question\"|\"note\",
+  \"confidence\": 0.0,
+  \"rationale\": \"...\",
+  \"suggested_repo\": \"string or null\"
+}
+
+Rules:
+- repo-change: task requires code changes, PRs, or modifications to a repository
+- research: task requires investigation, comparison, or summarization
+- ops: task requires infrastructure, tooling, or system administration
+- question: task is asking a question that needs an answer
+- note: everything else (personal admin, reminders, etc.)
+- Output MUST be valid JSON. Nothing else.
+
+Task:
+$TASK_CONTENT" 2>/dev/null)" || true
+
+  ACTION_CLEAN="$(echo "$ACTION_RAW" | sed -n '/^[[:space:]]*{/,/}[[:space:]]*$/p')"
+  [[ -z "$ACTION_CLEAN" ]] && ACTION_CLEAN="$ACTION_RAW"
+
+  if echo "$ACTION_CLEAN" | jq empty 2>/dev/null; then
+    AI_ACTION="$(echo "$ACTION_CLEAN" | jq -r '.action_type // "note"')"
+    case "$AI_ACTION" in
+      repo-change|research|ops|question|note)
+        ACTION_TYPE="$AI_ACTION"
+        ACTION_TYPE_METHOD="ai"
+        ACTION_TYPE_JSON="$(echo "$ACTION_CLEAN" | jq '.')"
+        ;;
+      *)
+        ACTION_TYPE="note"
+        ACTION_TYPE_METHOD="ai-fallback"
+        ;;
+    esac
+    echo "AI action type: $ACTION_TYPE"
+  else
+    echo "AI action type JSON invalid, defaulting to note."
+    ACTION_TYPE="note"
+    ACTION_TYPE_METHOD="default"
+  fi
+fi
+
+# Final default
+if [[ -z "$ACTION_TYPE" ]]; then
+  ACTION_TYPE="note"
+  ACTION_TYPE_METHOD="default"
+fi
+
+# Build action type JSON for envelope
+if [[ "$ACTION_TYPE_JSON" == "null" ]]; then
+  ACTION_TYPE_JSON="{\"action_type\":\"$ACTION_TYPE\",\"confidence\":1.0,\"rationale\":\"Matched via $ACTION_TYPE_METHOD\",\"suggested_repo\":null}"
+fi
+
+echo "Action type: $ACTION_TYPE method=$ACTION_TYPE_METHOD"
+
 # --- LLM Enrichment via OpenClaw CLI (strict JSON) ---
 ENRICHED=false
 RAW_JSON=""
@@ -274,6 +359,7 @@ _write_envelope() {
   "source_file": "${ORIGINAL_NAME}",
   "task_text": ${escaped_task},
   "classification": ${CLASSIFICATION_JSON},
+  "action_type": ${ACTION_TYPE_JSON},
   "planning": null,
   "enrichment": ${enrichment_json},
   "execution": {},
@@ -296,6 +382,13 @@ if ! {
     echo "- **Project:** $PROJECT_NAME" >> "$REPORT"
   fi
   echo "- **Method:** $CLASSIFICATION_METHOD" >> "$REPORT"
+  echo "" >> "$REPORT"
+
+  # Append action type section
+  echo "## Action Type" >> "$REPORT"
+  echo "" >> "$REPORT"
+  echo "- **Type:** $ACTION_TYPE" >> "$REPORT"
+  echo "- **Method:** $ACTION_TYPE_METHOD" >> "$REPORT"
   echo "" >> "$REPORT"
 
   # Append rendered enrichment
