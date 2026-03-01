@@ -13,7 +13,7 @@ use std::process::Command;
 #[derive(Parser)]
 #[command(name = "openclaw-daily-digest")]
 enum Cli {
-    /// Process the first inbox item
+    /// Process inbox items
     Run {
         /// Override the vault root directory
         #[arg(long, env = "DIGEST_ROOT")]
@@ -22,6 +22,10 @@ enum Cli {
         /// Do everything except move the inbox file
         #[arg(long)]
         dry_run: bool,
+
+        /// Maximum items to process per run (0 = unlimited)
+        #[arg(long, default_value = "10")]
+        max_items: usize,
     },
 }
 
@@ -109,14 +113,29 @@ fn default_expensive() -> String {
 fn main() {
     let cli = Cli::parse();
     match cli {
-        Cli::Run { root, dry_run } => {
-            let exit_code = run(root, dry_run);
+        Cli::Run {
+            root,
+            dry_run,
+            max_items,
+        } => {
+            let exit_code = run(root, dry_run, max_items);
             std::process::exit(exit_code);
         }
     }
 }
 
-fn run(root_override: Option<String>, dry_run: bool) -> i32 {
+/// Result of processing a single inbox item.
+#[derive(Debug)]
+struct ItemResult {
+    source_file: String,
+    project_name: Option<String>,
+    action_type: String,
+    exec_status: String,
+    enriched: bool,
+    failed: bool,
+}
+
+fn run(root_override: Option<String>, dry_run: bool, max_items: usize) -> i32 {
     let root = PathBuf::from(
         root_override.unwrap_or_else(|| "/Users/Shared/agent-vault/Agent".to_string()),
     );
@@ -138,15 +157,77 @@ fn run(root_override: Option<String>, dry_run: bool) -> i32 {
     // Load policy
     let policy = load_policy();
 
-    // Find first *.md in Inbox (non-recursive, sorted)
-    let inbox_file = match find_first_inbox_item(&inbox) {
-        Some(f) => f,
-        None => {
-            println!("No inbox items.");
-            return 0;
-        }
-    };
+    // Process items in a loop
+    let mut results: Vec<ItemResult> = Vec::new();
+    let limit = if max_items == 0 { usize::MAX } else { max_items };
 
+    loop {
+        if results.len() >= limit {
+            break;
+        }
+
+        let inbox_file = match find_first_inbox_item(&inbox) {
+            Some(f) => f,
+            None => break,
+        };
+
+        let item_num = results.len() + 1;
+        println!("\n--- Item {} ---", item_num);
+
+        let result = process_one_item(
+            &inbox_file,
+            &outbox,
+            &logs,
+            &processed,
+            &failed,
+            &projects_dir,
+            &openclaw_cmd,
+            &policy,
+            dry_run,
+        );
+        results.push(result);
+    }
+
+    if results.is_empty() {
+        println!("No inbox items.");
+        return 0;
+    }
+
+    // Print summary
+    let total = results.len();
+    let enriched_count = results.iter().filter(|r| r.enriched).count();
+    let unenriched_count = results.iter().filter(|r| !r.enriched && !r.failed).count();
+    let failed_count = results.iter().filter(|r| r.failed).count();
+
+    println!("\n--- Summary ---");
+    println!(
+        "Processed {} items ({} enriched, {} unenriched, {} failed).",
+        total, enriched_count, unenriched_count, failed_count
+    );
+
+    // Check if more items remain
+    if let Some(_) = find_first_inbox_item(&inbox) {
+        println!("More items remaining. Run again to continue.");
+    }
+
+    if failed_count > 0 && failed_count == total {
+        1
+    } else {
+        0
+    }
+}
+
+fn process_one_item(
+    inbox_file: &Path,
+    outbox: &Path,
+    logs: &Path,
+    processed: &Path,
+    failed: &Path,
+    projects_dir: &Path,
+    openclaw_cmd: &str,
+    policy: &Option<PolicyConfig>,
+    dry_run: bool,
+) -> ItemResult {
     let original_name = inbox_file
         .file_name()
         .unwrap()
@@ -160,23 +241,25 @@ fn run(root_override: Option<String>, dry_run: bool) -> i32 {
     let envelope_path = outbox.join(format!("{}-{}.envelope.json", timestamp, stem));
 
     // Read inbox content (first 200 lines)
-    let task_content = match read_first_n_lines(&inbox_file, 200) {
+    let task_content = match read_first_n_lines(inbox_file, 200) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Cannot read inbox file: {}", e);
-            move_file(&inbox_file, &failed.join(&original_name));
-            return 1;
+            move_file(inbox_file, &failed.join(&original_name));
+            return ItemResult {
+                source_file: original_name,
+                project_name: None,
+                action_type: "unknown".to_string(),
+                exec_status: "failed".to_string(),
+                enriched: false,
+                failed: true,
+            };
         }
     };
 
     // --- Project Classification (Level 1) ---
     let (project_kind, project_name, classification_method, classification_json) =
-        classify_project(
-            &task_content,
-            &projects_dir,
-            &openclaw_cmd,
-            &policy,
-        );
+        classify_project(&task_content, projects_dir, openclaw_cmd, policy);
     println!(
         "Project routing: kind={} name={} method={}",
         project_kind,
@@ -202,25 +285,22 @@ fn run(root_override: Option<String>, dry_run: bool) -> i32 {
 
     // --- Action Type Classification (Level 2) ---
     let (action_type, action_type_method, action_type_json) =
-        classify_action_type(&task_content, &openclaw_cmd, &policy);
-    println!(
-        "Action type: {} method={}",
-        action_type, action_type_method
-    );
+        classify_action_type(&task_content, openclaw_cmd, policy);
+    println!("Action type: {} method={}", action_type, action_type_method);
 
     // --- LLM Enrichment ---
     let (enriched, enrichment_rendered, enrichment_json) =
-        enrich(&task_content, &openclaw_cmd, &policy);
+        enrich(&task_content, openclaw_cmd, policy);
 
     // --- Execution Handlers ---
     let (exec_result, exec_json, exec_file) = execute_handler(
         &action_type,
         &task_content,
-        &outbox,
+        outbox,
         &timestamp,
         stem,
-        &openclaw_cmd,
-        &policy,
+        openclaw_cmd,
+        policy,
     );
     println!("Execution: {}", exec_result);
 
@@ -239,28 +319,25 @@ fn run(root_override: Option<String>, dry_run: bool) -> i32 {
         &enrichment_json,
     );
 
-    // Write report atomically (temp file then rename)
+    // Write report atomically
     if let Err(e) = atomic_write(&report_path, report_content.as_bytes()) {
         eprintln!("Cannot write report: {}", e);
-        let _ = append_log(
-            &logs,
-            &today,
-            &timestamp,
-            &original_name,
-            &report_path,
-            "Failed/",
-            "error",
-        );
+        let _ = append_log(logs, &today, &timestamp, &original_name, &report_path, "Failed/", "error");
         if !dry_run {
-            move_file(&inbox_file, &failed.join(&original_name));
+            move_file(inbox_file, &failed.join(&original_name));
         }
-        return 1;
+        return ItemResult {
+            source_file: original_name,
+            project_name: project_name.clone(),
+            action_type,
+            exec_status: "failed".to_string(),
+            enriched: false,
+            failed: true,
+        };
     }
 
-    // Determine envelope status
     let envelope_status = if enriched { "enriched" } else { "unenriched" };
 
-    // Write envelope
     let envelope = Envelope {
         version: "1.0.0".to_string(),
         timestamp: timestamp.clone(),
@@ -278,20 +355,10 @@ fn run(root_override: Option<String>, dry_run: bool) -> i32 {
         eprintln!("Cannot write envelope: {}", e);
     }
 
-    // Append log
-    let _ = append_log(
-        &logs,
-        &today,
-        &timestamp,
-        &original_name,
-        &report_path,
-        "Processed/",
-        envelope_status,
-    );
+    let _ = append_log(logs, &today, &timestamp, &original_name, &report_path, "Processed/", envelope_status);
 
-    // Move inbox file to Processed
     if !dry_run {
-        move_file(&inbox_file, &processed.join(&original_name));
+        move_file(inbox_file, &processed.join(&original_name));
     }
 
     println!("Digest written: {}", report_path.display());
@@ -299,12 +366,17 @@ fn run(root_override: Option<String>, dry_run: bool) -> i32 {
     if dry_run {
         println!("Dry run — inbox item NOT moved.");
     } else {
-        println!(
-            "Inbox item moved to: {}",
-            processed.join(&original_name).display()
-        );
+        println!("Inbox item moved to: {}", processed.join(&original_name).display());
     }
-    0
+
+    ItemResult {
+        source_file: original_name,
+        project_name,
+        action_type,
+        exec_status: exec_result,
+        enriched,
+        failed: false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1104,7 +1176,7 @@ mod tests {
             std::env::remove_var("MOCK_OPENCLAW_FAIL");
             std::env::remove_var("MOCK_OPENCLAW_INVALID");
         }
-        run(Some(vault.root.to_string_lossy().to_string()), dry_run)
+        run(Some(vault.root.to_string_lossy().to_string()), dry_run, 10)
     }
 
     #[test]
@@ -1192,7 +1264,7 @@ mod tests {
         );
 
         let code =
-            run(Some(vault.root.to_string_lossy().to_string()), false);
+            run(Some(vault.root.to_string_lossy().to_string()), false, 10);
         assert_eq!(code, 0);
         assert!(
             vault.root.join("Inbox/Processed/fail-task.md").exists()
@@ -1257,5 +1329,75 @@ mod tests {
         }
 
         assert!(vault.root.join("Inbox/Failed/io-task.md").exists());
+    }
+
+    #[test]
+    fn test_multiple_items_processed() {
+        let vault = TestVault::new();
+        vault.place_inbox("a-task.md", "Buy groceries.");
+        vault.place_inbox("b-task.md", "Read a book.");
+        vault.place_inbox("c-task.md", "Water the plants.");
+
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+
+        // All three should be in Processed
+        assert!(vault.root.join("Inbox/Processed/a-task.md").exists());
+        assert!(vault.root.join("Inbox/Processed/b-task.md").exists());
+        assert!(vault.root.join("Inbox/Processed/c-task.md").exists());
+
+        // No items left in Inbox
+        let remaining: Vec<_> = fs::read_dir(vault.root.join("Inbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file() && e.path().extension().is_some_and(|ext| ext == "md"))
+            .collect();
+        assert_eq!(remaining.len(), 0);
+
+        // Outbox should have 3 reports + 3 envelopes = 6 files
+        let outbox_count = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .count();
+        assert!(outbox_count >= 6);
+    }
+
+    #[test]
+    fn test_max_items_limit() {
+        let vault = TestVault::new();
+        vault.place_inbox("a-task.md", "Task A.");
+        vault.place_inbox("b-task.md", "Task B.");
+        vault.place_inbox("c-task.md", "Task C.");
+
+        // SAFETY: tests run with --test-threads=1
+        unsafe {
+            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
+            std::env::set_var(
+                "DIGEST_POLICY",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("config/policy.json")
+                    .to_str()
+                    .unwrap(),
+            );
+            std::env::remove_var("MOCK_OPENCLAW_FAIL");
+            std::env::remove_var("MOCK_OPENCLAW_INVALID");
+        }
+
+        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 2);
+        assert_eq!(code, 0);
+
+        // Only 2 processed, 1 remaining
+        let processed_count = fs::read_dir(vault.root.join("Inbox/Processed"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+            .count();
+        assert_eq!(processed_count, 2);
+
+        let remaining_count = fs::read_dir(vault.root.join("Inbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file() && e.path().extension().is_some_and(|ext| ext == "md"))
+            .count();
+        assert_eq!(remaining_count, 1);
     }
 }

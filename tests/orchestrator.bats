@@ -304,21 +304,44 @@ place_fixture() {
 }
 
 # ============================================================
-# Test: Only first inbox item is processed per run
+# Test: All inbox items processed in one run
 # ============================================================
-@test "only first item processed when multiple inbox items exist" {
+@test "all items processed when multiple inbox items exist" {
   place_fixture "ops-task.md"
   place_fixture "unclassified-note.md"
 
   run bash "$SCRIPT"
   [ "$status" -eq 0 ]
 
-  # Count: exactly one in Processed, one still in Inbox
+  # Both should be in Processed
+  local processed_count inbox_count
+  processed_count="$(ls "$TEST_ROOT/Inbox/Processed/"*.md 2>/dev/null | wc -l | tr -d ' ')"
+  inbox_count="$(ls "$TEST_ROOT/Inbox/"*.md 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$processed_count" -eq 2 ]
+  [ "$inbox_count" -eq 0 ]
+
+  # Summary line should appear
+  [[ "$output" == *"Processed 2 items"* ]]
+}
+
+# ============================================================
+# Test: --max-items limit respected
+# ============================================================
+@test "max items limit stops processing" {
+  export DIGEST_MAX_ITEMS=1
+  place_fixture "ops-task.md"
+  place_fixture "unclassified-note.md"
+
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+
   local processed_count inbox_count
   processed_count="$(ls "$TEST_ROOT/Inbox/Processed/"*.md 2>/dev/null | wc -l | tr -d ' ')"
   inbox_count="$(ls "$TEST_ROOT/Inbox/"*.md 2>/dev/null | wc -l | tr -d ' ')"
   [ "$processed_count" -eq 1 ]
   [ "$inbox_count" -eq 1 ]
+
+  [[ "$output" == *"items remaining"* ]]
 }
 
 # ============================================================

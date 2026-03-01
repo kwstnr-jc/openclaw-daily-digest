@@ -68,13 +68,27 @@ _model_max_tokens() {
   jq -r ".models.\"$tier\".max_tokens // empty" "$POLICY_FILE"
 }
 
-# Find first *.md file in Inbox (no subfolders)
-INBOX_FILE="$(find "$INBOX" -maxdepth 1 -name '*.md' -type f | sort | head -n 1)"
+MAX_ITEMS="${DIGEST_MAX_ITEMS:-10}"
+ITEMS_PROCESSED=0
+ITEMS_ENRICHED=0
+ITEMS_UNENRICHED=0
+ITEMS_FAILED=0
 
-if [[ -z "$INBOX_FILE" ]]; then
-  echo "No inbox items."
-  exit 0
-fi
+while true; do
+  if [[ "$MAX_ITEMS" -gt 0 && "$ITEMS_PROCESSED" -ge "$MAX_ITEMS" ]]; then
+    break
+  fi
+
+  # Find first *.md file in Inbox (no subfolders)
+  INBOX_FILE="$(find "$INBOX" -maxdepth 1 -name '*.md' -type f | sort | head -n 1)"
+
+  if [[ -z "$INBOX_FILE" ]]; then
+    break
+  fi
+
+  ITEMS_PROCESSED=$((ITEMS_PROCESSED + 1))
+  echo ""
+  echo "--- Item $ITEMS_PROCESSED ---"
 
 ORIGINAL_NAME="$(basename "$INBOX_FILE")"
 STEM="$(basename "$INBOX_FILE" .md)"
@@ -581,13 +595,17 @@ if ! {
   # Write failure envelope
   _write_envelope "failed"
   echo "Processing failed: $ORIGINAL_NAME (moved to Failed/)"
-  exit 0
+  ITEMS_FAILED=$((ITEMS_FAILED + 1))
+  continue
 fi
 
 # Success: move to Processed, log it
 ENVELOPE_STATUS="unenriched"
 if [[ "$ENRICHED" == "true" ]]; then
   ENVELOPE_STATUS="enriched"
+  ITEMS_ENRICHED=$((ITEMS_ENRICHED + 1))
+else
+  ITEMS_UNENRICHED=$((ITEMS_UNENRICHED + 1))
 fi
 
 # --- Write envelope.json ---
@@ -599,4 +617,22 @@ echo "[$TIMESTAMP] $ORIGINAL_NAME -> $(basename "$REPORT") -> Processed/ [$ENVEL
 echo "Digest written: $REPORT"
 echo "Envelope written: $ENVELOPE"
 echo "Inbox item moved to: $PROCESSED/$ORIGINAL_NAME"
+
+done  # end of while loop
+
+if [[ "$ITEMS_PROCESSED" -eq 0 ]]; then
+  echo "No inbox items."
+  exit 0
+fi
+
+echo ""
+echo "--- Summary ---"
+echo "Processed $ITEMS_PROCESSED items ($ITEMS_ENRICHED enriched, $ITEMS_UNENRICHED unenriched, $ITEMS_FAILED failed)."
+
+# Check if more items remain
+REMAINING="$(find "$INBOX" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d ' ')"
+if [[ "$REMAINING" -gt 0 ]]; then
+  echo "$REMAINING items remaining. Run again to continue."
+fi
+
 exit 0
