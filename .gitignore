@@ -17,6 +17,9 @@ Memory/
 .DS_Store
 Thumbs.db
 
+# Test vendored deps
+tests/bats-core/
+
 # Editor
 *.swp
 *.swo

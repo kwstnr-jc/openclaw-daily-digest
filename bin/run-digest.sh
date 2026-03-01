@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/Users/Shared/agent-vault/Agent"
+ROOT="${DIGEST_ROOT:-/Users/Shared/agent-vault/Agent}"
 INBOX="$ROOT/Inbox"
 OUTBOX="$ROOT/Outbox"
 LOGS="$ROOT/Logs"
@@ -304,8 +304,8 @@ $TASK_CONTENT" 2>/dev/null)" || true
     CLEAN_JSON="$RAW_JSON"
   fi
 
-  # Validate with jq
-  if echo "$CLEAN_JSON" | jq empty 2>/dev/null; then
+  # Validate with jq (must be non-empty)
+  if [[ -n "$CLEAN_JSON" ]] && echo "$CLEAN_JSON" | jq empty 2>/dev/null; then
     # Render Planned Actions
     RENDERED_ENRICHMENT="## Planned Actions"$'\n'
     while IFS= read -r action; do
