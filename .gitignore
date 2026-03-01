@@ -1,0 +1,25 @@
+# Secrets
+.env
+*.token
+*.key
+*.pem
+.digest-bot-token
+
+# Runtime vault artifacts (never commit)
+Inbox/
+Outbox/
+Logs/
+Processed/
+Failed/
+Memory/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
