@@ -1,5 +1,6 @@
 pub fn build_report(
     task_content: &str,
+    source_stem: &str,
     project_kind: &str,
     project_name: Option<&str>,
     classification_method: &str,
@@ -12,6 +13,18 @@ pub fn build_report(
     enrichment_json: &serde_json::Value,
 ) -> String {
     let mut report = String::new();
+
+    // Frontmatter
+    report.push_str("---\ntags:\n  - digest\n");
+    if let Some(name) = project_name {
+        report.push_str(&format!("  - {}\n", name));
+    }
+    report.push_str(&format!("source: \"[[{}]]\"\n", source_stem));
+    report.push_str("---\n\n");
+
+    // Wikilink to source item
+    report.push_str(&format!("Source: [[{}]]\n\n", source_stem));
+
     report.push_str(task_content);
     report.push_str("\n\n---\n\n");
 

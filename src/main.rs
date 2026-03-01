@@ -79,9 +79,16 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
     let processed = inbox.join("Processed");
     let failed = inbox.join("Failed");
     let projects_dir = root.join("Projects");
+    let envelope_dir = PathBuf::from(
+        std::env::var("DIGEST_ENVELOPE_DIR")
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/agent".to_string());
+                format!("{}/data/digest-envelopes", home)
+            }),
+    );
 
     // Ensure directories exist
-    for dir in [&outbox, &logs, &processed, &failed] {
+    for dir in [&outbox, &logs, &processed, &failed, &envelope_dir] {
         fs::create_dir_all(dir).ok();
     }
 
@@ -114,6 +121,7 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
         let result = process_one_item(
             &inbox_file,
             &outbox,
+            &envelope_dir,
             &logs,
             &processed,
             &failed,
@@ -165,6 +173,7 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
 fn process_one_item(
     inbox_file: &Path,
     outbox: &Path,
+    envelope_dir: &Path,
     logs: &Path,
     processed: &Path,
     failed: &Path,
@@ -182,7 +191,7 @@ fn process_one_item(
     let timestamp = now.format("%Y-%m-%d_%H%M").to_string();
     let today = now.format("%Y-%m-%d").to_string();
     let report_path = outbox.join(format!("{}-{}-digest.md", timestamp, stem));
-    let envelope_path = outbox.join(format!("{}-{}.envelope.json", timestamp, stem));
+    let envelope_path = envelope_dir.join(format!("{}-{}.envelope.json", timestamp, stem));
 
     // Read inbox content (first 200 lines)
     let task_content = match read_first_n_lines(inbox_file, 200) {
@@ -255,6 +264,7 @@ fn process_one_item(
     // --- Build report ---
     let report_content = build_report(
         &task_content,
+        stem,
         &project_kind,
         project_name.as_deref(),
         &classification_method,
@@ -356,6 +366,7 @@ mod tests {
             fs::create_dir_all(root.join("Inbox/Processed")).unwrap();
             fs::create_dir_all(root.join("Inbox/Failed")).unwrap();
             fs::create_dir_all(root.join("Outbox")).unwrap();
+            fs::create_dir_all(root.join("Envelopes")).unwrap();
             fs::create_dir_all(root.join("Logs")).unwrap();
             fs::create_dir_all(root.join("Projects")).unwrap();
             TestVault { root }
@@ -401,11 +412,24 @@ mod tests {
                 "OPENCLAW_CMD",
                 mock_path().to_str().unwrap(),
             );
+            std::env::set_var(
+                "DIGEST_ENVELOPE_DIR",
+                vault.root.join("Envelopes").to_str().unwrap(),
+            );
             std::env::remove_var("MOCK_OPENCLAW_FAIL");
             std::env::remove_var("MOCK_OPENCLAW_INVALID");
             std::env::remove_var("MOCK_OPENCLAW_LOG");
         }
         run(Some(vault.root.to_string_lossy().to_string()), dry_run, 10, true)
+    }
+
+    fn find_envelope(vault: &TestVault) -> serde_json::Value {
+        let envelope_file = fs::read_dir(vault.root.join("Envelopes"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .expect("No envelope.json found in Envelopes/");
+        serde_json::from_str(&fs::read_to_string(envelope_file.path()).unwrap()).unwrap()
     }
 
     #[test]
@@ -435,24 +459,15 @@ mod tests {
         assert!(!vault.root.join("Inbox/test-task.md").exists());
         assert!(vault.root.join("Inbox/Processed/test-task.md").exists());
 
-        // Outbox has report and envelope
+        // Outbox has report
         let outbox_files: Vec<_> = fs::read_dir(vault.root.join("Outbox"))
             .unwrap()
             .filter_map(|e| e.ok())
             .collect();
-        assert!(outbox_files.len() >= 2);
+        assert!(!outbox_files.is_empty());
 
-        // Envelope is valid JSON with correct fields
-        let envelope_file = outbox_files
-            .iter()
-            .find(|e| {
-                e.path().extension().is_some_and(|ext| ext == "json")
-            })
-            .unwrap();
-        let content =
-            fs::read_to_string(envelope_file.path()).unwrap();
-        let envelope: serde_json::Value =
-            serde_json::from_str(&content).unwrap();
+        // Envelope is in Envelopes dir with correct fields
+        let envelope = find_envelope(&vault);
         assert_eq!(envelope["status"], "enriched");
         assert_eq!(
             envelope["classification"]["project"]["kind"],
@@ -478,6 +493,10 @@ mod tests {
                 mock_path().to_str().unwrap(),
             );
             std::env::set_var("MOCK_OPENCLAW_FAIL", "1");
+            std::env::set_var(
+                "DIGEST_ENVELOPE_DIR",
+                vault.root.join("Envelopes").to_str().unwrap(),
+            );
         }
         vault.create_project("openclaw-daily-digest");
         vault.place_inbox(
@@ -492,17 +511,7 @@ mod tests {
             vault.root.join("Inbox/Processed/fail-task.md").exists()
         );
 
-        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .find(|e| {
-                e.path().extension().is_some_and(|ext| ext == "json")
-            })
-            .unwrap();
-        let content =
-            fs::read_to_string(envelope_file.path()).unwrap();
-        let envelope: serde_json::Value =
-            serde_json::from_str(&content).unwrap();
+        let envelope = find_envelope(&vault);
         assert_eq!(envelope["status"], "unenriched");
     }
 
@@ -576,11 +585,17 @@ mod tests {
             .collect();
         assert_eq!(remaining.len(), 0);
 
-        // Outbox should have 3 reports + 3 envelopes = 6 files
+        // Outbox should have 3 digest reports
         let outbox_count = fs::read_dir(vault.root.join("Outbox"))
             .unwrap()
             .count();
-        assert!(outbox_count >= 6);
+        assert_eq!(outbox_count, 3);
+
+        // Envelopes dir should have 3 envelope files
+        let envelope_count = fs::read_dir(vault.root.join("Envelopes"))
+            .unwrap()
+            .count();
+        assert_eq!(envelope_count, 3);
     }
 
     #[test]
@@ -593,6 +608,10 @@ mod tests {
         // SAFETY: tests run with --test-threads=1
         unsafe {
             std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
+            std::env::set_var(
+                "DIGEST_ENVELOPE_DIR",
+                vault.root.join("Envelopes").to_str().unwrap(),
+            );
             std::env::remove_var("MOCK_OPENCLAW_FAIL");
             std::env::remove_var("MOCK_OPENCLAW_INVALID");
         }
@@ -689,13 +708,7 @@ mod tests {
         assert_eq!(code, 0);
         assert!(vault.root.join("Inbox/Processed/fix-thing.md").exists());
 
-        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-            .unwrap();
-        let content = fs::read_to_string(envelope_file.path()).unwrap();
-        let envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let envelope = find_envelope(&vault);
         // repo-change should be skipped because no .git dir exists
         assert_eq!(envelope["execution"]["status"], "skipped");
         assert_eq!(envelope["execution"]["handler"], "repo-change");
@@ -721,13 +734,7 @@ mod tests {
             .collect();
         assert_eq!(ops_log.len(), 1);
 
-        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-            .unwrap();
-        let content = fs::read_to_string(envelope_file.path()).unwrap();
-        let envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let envelope = find_envelope(&vault);
         assert_eq!(envelope["execution"]["handler"], "ops");
         assert_eq!(envelope["execution"]["status"], "completed");
     }
@@ -744,13 +751,7 @@ mod tests {
         assert_eq!(code, 0);
         assert!(vault.root.join("Inbox/Processed/dangerous-task.md").exists());
 
-        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-            .unwrap();
-        let content = fs::read_to_string(envelope_file.path()).unwrap();
-        let envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let envelope = find_envelope(&vault);
         assert_eq!(envelope["execution"]["status"], "skipped");
     }
 
@@ -764,8 +765,7 @@ mod tests {
         assert!(proj.exists());
         assert!(proj.join("README.md").exists());
         assert!(proj.join("Inbox").exists());
-        let envelope_file = fs::read_dir(vault.root.join("Outbox")).unwrap().filter_map(|e| e.ok()).find(|e| e.path().extension().is_some_and(|ext| ext == "json")).unwrap();
-        let envelope: serde_json::Value = serde_json::from_str(&fs::read_to_string(envelope_file.path()).unwrap()).unwrap();
+        let envelope = find_envelope(&vault);
         assert_eq!(envelope["classification"]["project"]["kind"], "new");
         assert_eq!(envelope["classification"]["project"]["name"], "home-automation");
     }
@@ -792,8 +792,7 @@ mod tests {
         assert_eq!(answers.len(), 1);
         let content = fs::read_to_string(answers[0].path()).unwrap();
         assert!(content.contains("## Answer"));
-        let envelope_file = fs::read_dir(vault.root.join("Outbox")).unwrap().filter_map(|e| e.ok()).find(|e| e.path().extension().is_some_and(|ext| ext == "json")).unwrap();
-        let envelope: serde_json::Value = serde_json::from_str(&fs::read_to_string(envelope_file.path()).unwrap()).unwrap();
+        let envelope = find_envelope(&vault);
         assert_eq!(envelope["action_type"]["action_type"], "question");
     }
 
@@ -804,8 +803,7 @@ mod tests {
         vault.place_inbox("tag.md", "#project/openclaw-daily-digest\n\nUpdate the README.");
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
-        let envelope_file = fs::read_dir(vault.root.join("Outbox")).unwrap().filter_map(|e| e.ok()).find(|e| e.path().extension().is_some_and(|ext| ext == "json")).unwrap();
-        let envelope: serde_json::Value = serde_json::from_str(&fs::read_to_string(envelope_file.path()).unwrap()).unwrap();
+        let envelope = find_envelope(&vault);
         assert_eq!(envelope["classification"]["project"]["kind"], "existing");
         assert_eq!(envelope["classification"]["project"]["name"], "openclaw-daily-digest");
     }
@@ -816,8 +814,7 @@ mod tests {
         vault.place_inbox("groceries.md", "Pick up milk, eggs, bread, coffee beans.");
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
-        let envelope_file = fs::read_dir(vault.root.join("Outbox")).unwrap().filter_map(|e| e.ok()).find(|e| e.path().extension().is_some_and(|ext| ext == "json")).unwrap();
-        let envelope: serde_json::Value = serde_json::from_str(&fs::read_to_string(envelope_file.path()).unwrap()).unwrap();
+        let envelope = find_envelope(&vault);
         assert_eq!(envelope["action_type"]["action_type"], "note");
         assert_eq!(envelope["execution"]["status"], "none");
     }
@@ -828,12 +825,15 @@ mod tests {
         unsafe {
             std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
             std::env::set_var("MOCK_OPENCLAW_INVALID", "1");
+            std::env::set_var(
+                "DIGEST_ENVELOPE_DIR",
+                vault.root.join("Envelopes").to_str().unwrap(),
+            );
         }
         vault.place_inbox("invalid.md", "Some random note.");
         let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
         assert_eq!(code, 0);
-        let envelope_file = fs::read_dir(vault.root.join("Outbox")).unwrap().filter_map(|e| e.ok()).find(|e| e.path().extension().is_some_and(|ext| ext == "json")).unwrap();
-        let envelope: serde_json::Value = serde_json::from_str(&fs::read_to_string(envelope_file.path()).unwrap()).unwrap();
+        let envelope = find_envelope(&vault);
         assert_eq!(envelope["status"], "unenriched");
     }
 
