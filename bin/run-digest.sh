@@ -8,6 +8,9 @@ LOGS="$ROOT/Logs"
 PROCESSED="$INBOX/Processed"
 FAILED="$INBOX/Failed"
 ENRICHMENT_TIMEOUT=120
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+POLICY_FILE="${DIGEST_POLICY:-$REPO_DIR/config/policy.json}"
 
 mkdir -p "$OUTBOX" "$LOGS" "$PROCESSED" "$FAILED"
 
@@ -24,6 +27,46 @@ if ! command -v jq &>/dev/null; then
     echo "Warning: jq unavailable. JSON enrichment will fall back to plain text."
   fi
 fi
+
+# --- Model selection policy ---
+HAS_POLICY=false
+if [[ "$HAS_JQ" == "true" && -f "$POLICY_FILE" ]] && jq empty "$POLICY_FILE" 2>/dev/null; then
+  HAS_POLICY=true
+  echo "Policy loaded: $POLICY_FILE"
+fi
+
+# _select_model <step> [task_content]
+# Returns the model name for the given step, applying overrides.
+# Steps: classification, action_type, enrichment, research, question, deep_analysis
+_select_model() {
+  local step="$1"
+  local content="${2:-}"
+
+  if [[ "$HAS_POLICY" != "true" ]]; then
+    echo ""
+    return
+  fi
+
+  local tier
+  tier="$(jq -r ".routing.\"$step\" // \"mid\"" "$POLICY_FILE")"
+
+  # Override: #deep tag → expensive model
+  local deep_tag
+  deep_tag="$(jq -r '.overrides.deep_tag // "#deep"' "$POLICY_FILE")"
+  if [[ -n "$content" ]] && echo "$content" | grep -qF "$deep_tag" 2>/dev/null; then
+    tier="$(jq -r '.overrides.deep_tag_model // "expensive"' "$POLICY_FILE")"
+  fi
+
+  jq -r ".models.\"$tier\".name // empty" "$POLICY_FILE"
+}
+
+_model_max_tokens() {
+  local step="$1"
+  if [[ "$HAS_POLICY" != "true" ]]; then echo ""; return; fi
+  local tier
+  tier="$(jq -r ".routing.\"$step\" // \"mid\"" "$POLICY_FILE")"
+  jq -r ".models.\"$tier\".max_tokens // empty" "$POLICY_FILE"
+}
 
 # Find first *.md file in Inbox (no subfolders)
 INBOX_FILE="$(find "$INBOX" -maxdepth 1 -name '*.md' -type f | sort | head -n 1)"
@@ -95,9 +138,13 @@ fi
 # Rule 4: AI-assisted classification via OpenClaw
 if [[ -z "$PROJECT_NAME" ]] && command -v openclaw &>/dev/null && [[ "$HAS_JQ" == "true" ]]; then
   echo "Calling OpenClaw for project classification..."
+  CLASSIFY_MODEL="$(_select_model classification "$TASK_CONTENT")"
+  CLASSIFY_MODEL_ARGS=()
+  [[ -n "$CLASSIFY_MODEL" ]] && CLASSIFY_MODEL_ARGS=(--model "$CLASSIFY_MODEL")
   CLASSIFY_RAW="$(openclaw agent \
     --agent main \
     --timeout "$ENRICHMENT_TIMEOUT" \
+    "${CLASSIFY_MODEL_ARGS[@]}" \
     --message "You are a strict JSON API. Classify the following task into a project.
 
 Return ONLY a JSON object:
@@ -200,9 +247,13 @@ fi
 # AI fallback if no deterministic match
 if [[ -z "$ACTION_TYPE" ]] && command -v openclaw &>/dev/null && [[ "$HAS_JQ" == "true" ]]; then
   echo "Calling OpenClaw for action type classification..."
+  ACTION_MODEL="$(_select_model action_type "$TASK_CONTENT")"
+  ACTION_MODEL_ARGS=()
+  [[ -n "$ACTION_MODEL" ]] && ACTION_MODEL_ARGS=(--model "$ACTION_MODEL")
   ACTION_RAW="$(openclaw agent \
     --agent main \
     --timeout "$ENRICHMENT_TIMEOUT" \
+    "${ACTION_MODEL_ARGS[@]}" \
     --message "You are a strict JSON API. Classify the action type for the following task.
 
 Return ONLY a JSON object:
@@ -277,9 +328,13 @@ FALLBACK_ENRICHMENT="## Planned Actions
 
 if command -v openclaw &>/dev/null && [[ "$HAS_JQ" == "true" ]]; then
   echo "Calling OpenClaw for JSON enrichment..."
+  ENRICH_MODEL="$(_select_model enrichment "$TASK_CONTENT")"
+  ENRICH_MODEL_ARGS=()
+  [[ -n "$ENRICH_MODEL" ]] && ENRICH_MODEL_ARGS=(--model "$ENRICH_MODEL")
   RAW_JSON="$(openclaw agent \
     --agent main \
     --timeout "$ENRICHMENT_TIMEOUT" \
+    "${ENRICH_MODEL_ARGS[@]}" \
     --message "You are a strict JSON API. Given the task below, return ONLY a single JSON object. No markdown fences, no prose, no explanation — just the raw JSON object.
 
 Schema:
@@ -351,9 +406,13 @@ case "$ACTION_TYPE" in
     EXECUTION_FILE="$OUTBOX/${TIMESTAMP}-${STEM}.research.md"
     echo "Executing research handler..."
     if command -v openclaw &>/dev/null; then
+      RESEARCH_MODEL="$(_select_model research "$TASK_CONTENT")"
+      RESEARCH_MODEL_ARGS=()
+      [[ -n "$RESEARCH_MODEL" ]] && RESEARCH_MODEL_ARGS=(--model "$RESEARCH_MODEL")
       RESEARCH_RAW="$(openclaw agent \
         --agent main \
         --timeout "$ENRICHMENT_TIMEOUT" \
+        "${RESEARCH_MODEL_ARGS[@]}" \
         --message "You are a research assistant. Given the task below, produce a structured research report.
 
 Format your response as markdown with these exact sections:
@@ -390,9 +449,13 @@ $TASK_CONTENT" 2>/dev/null)" || true
     EXECUTION_FILE="$OUTBOX/${TIMESTAMP}-${STEM}.research.md"
     echo "Executing question handler..."
     if command -v openclaw &>/dev/null; then
+      QUESTION_MODEL="$(_select_model question "$TASK_CONTENT")"
+      QUESTION_MODEL_ARGS=()
+      [[ -n "$QUESTION_MODEL" ]] && QUESTION_MODEL_ARGS=(--model "$QUESTION_MODEL")
       ANSWER_RAW="$(openclaw agent \
         --agent main \
         --timeout "$ENRICHMENT_TIMEOUT" \
+        "${QUESTION_MODEL_ARGS[@]}" \
         --message "You are an expert assistant. Given the question below, produce a structured answer.
 
 Format your response as markdown with these exact sections:

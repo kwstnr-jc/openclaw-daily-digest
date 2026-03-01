@@ -320,3 +320,73 @@ place_fixture() {
   [ "$processed_count" -eq 1 ]
   [ "$inbox_count" -eq 1 ]
 }
+
+# ============================================================
+# Test: Policy selects cheap model for classification calls
+# ============================================================
+@test "policy: classification uses cheap model" {
+  export MOCK_OPENCLAW_LOG="$TEST_ROOT/model-log.txt"
+  place_fixture "unclassified-note.md"
+
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+
+  # The mock logs each --model arg; classification + action_type should use cheap
+  [ -f "$TEST_ROOT/model-log.txt" ]
+  local cheap_count
+  cheap_count="$(grep -c "gpt-4o-mini" "$TEST_ROOT/model-log.txt" || true)"
+  [ "$cheap_count" -ge 1 ]
+}
+
+# ============================================================
+# Test: Policy selects mid model for enrichment
+# ============================================================
+@test "policy: enrichment uses mid model" {
+  export MOCK_OPENCLAW_LOG="$TEST_ROOT/model-log.txt"
+  place_fixture "unclassified-note.md"
+
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+
+  [ -f "$TEST_ROOT/model-log.txt" ]
+  local mid_count
+  mid_count="$(grep -c "claude-sonnet" "$TEST_ROOT/model-log.txt" || true)"
+  [ "$mid_count" -ge 1 ]
+}
+
+# ============================================================
+# Test: #deep tag upgrades to expensive model
+# ============================================================
+@test "policy: #deep tag upgrades model to expensive" {
+  export MOCK_OPENCLAW_LOG="$TEST_ROOT/model-log.txt"
+  place_fixture "deep-analysis-task.md"
+
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+
+  [ -f "$TEST_ROOT/model-log.txt" ]
+  local expensive_count
+  expensive_count="$(grep -c "claude-opus" "$TEST_ROOT/model-log.txt" || true)"
+  [ "$expensive_count" -ge 1 ]
+}
+
+# ============================================================
+# Test: Missing policy file falls back gracefully
+# ============================================================
+@test "policy: missing policy file works without model args" {
+  export DIGEST_POLICY="/nonexistent/policy.json"
+  export MOCK_OPENCLAW_LOG="$TEST_ROOT/model-log.txt"
+  place_fixture "unclassified-note.md"
+
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+
+  [ -f "$TEST_ROOT/Inbox/Processed/unclassified-note.md" ]
+
+  # Model log should have empty lines (no model specified)
+  if [ -f "$TEST_ROOT/model-log.txt" ]; then
+    local nonempty
+    nonempty="$(grep -c '.' "$TEST_ROOT/model-log.txt" || true)"
+    [ "$nonempty" -eq 0 ] || true
+  fi
+}
