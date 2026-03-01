@@ -635,4 +635,33 @@ if [[ "$REMAINING" -gt 0 ]]; then
   echo "$REMAINING items remaining. Run again to continue."
 fi
 
+# --- Discord posting ---
+DISCORD_TOKEN_FILE="${DISCORD_TOKEN_FILE:-$HOME/.digest-bot-token}"
+DISCORD_CHANNEL_ID="${DISCORD_CHANNEL_ID:-1477340656350396668}"
+NO_DISCORD="${NO_DISCORD:-false}"
+
+if [[ "$NO_DISCORD" != "true" && "$ITEMS_PROCESSED" -gt 0 ]]; then
+  if [[ -f "$DISCORD_TOKEN_FILE" ]]; then
+    BOT_TOKEN="$(cat "$DISCORD_TOKEN_FILE" | tr -d '[:space:]')"
+    if [[ -n "$BOT_TOKEN" ]]; then
+      MSG="**Daily Digest — $(date '+%Y-%m-%d %H:%M')**\n\nProcessed $ITEMS_PROCESSED items.\n\nEnriched: $ITEMS_ENRICHED | Unenriched: $ITEMS_UNENRICHED | Failed: $ITEMS_FAILED"
+      PAYLOAD="$(jq -n --arg content "$MSG" '{"content":$content}')"
+      HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+        -X POST "https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages" \
+        -H "Authorization: Bot ${BOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "$PAYLOAD" 2>/dev/null || true)"
+      if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "204" ]]; then
+        echo "Discord summary posted."
+      else
+        echo "Discord post failed (HTTP $HTTP_CODE) — non-fatal." >&2
+      fi
+    else
+      echo "Discord token file empty — skipping post." >&2
+    fi
+  else
+    echo "Discord token file not found — skipping post." >&2
+  fi
+fi
+
 exit 0

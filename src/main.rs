@@ -26,6 +26,10 @@ enum Cli {
         /// Maximum items to process per run (0 = unlimited)
         #[arg(long, default_value = "10")]
         max_items: usize,
+
+        /// Skip posting to Discord
+        #[arg(long)]
+        no_discord: bool,
     },
 }
 
@@ -117,8 +121,9 @@ fn main() {
             root,
             dry_run,
             max_items,
+            no_discord,
         } => {
-            let exit_code = run(root, dry_run, max_items);
+            let exit_code = run(root, dry_run, max_items, no_discord);
             std::process::exit(exit_code);
         }
     }
@@ -135,7 +140,7 @@ struct ItemResult {
     failed: bool,
 }
 
-fn run(root_override: Option<String>, dry_run: bool, max_items: usize) -> i32 {
+fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discord: bool) -> i32 {
     let root = PathBuf::from(
         root_override.unwrap_or_else(|| "/Users/Shared/agent-vault/Agent".to_string()),
     );
@@ -208,6 +213,15 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize) -> i32 {
     // Check if more items remain
     if let Some(_) = find_first_inbox_item(&inbox) {
         println!("More items remaining. Run again to continue.");
+    }
+
+    // Post to Discord
+    if !no_discord && !results.is_empty() {
+        let message = format_discord_message(&results);
+        match post_to_discord(&message) {
+            Ok(()) => println!("Discord summary posted."),
+            Err(e) => eprintln!("Discord post failed (non-fatal): {}", e),
+        }
     }
 
     if failed_count > 0 && failed_count == total {
@@ -1095,6 +1109,91 @@ fn which_exists(cmd: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Discord posting
+// ---------------------------------------------------------------------------
+
+fn format_discord_message(results: &[ItemResult]) -> String {
+    let now = Local::now();
+    let mut msg = format!("**Daily Digest — {}**\n\n", now.format("%Y-%m-%d %H:%M"));
+
+    msg.push_str(&format!("Processed {} items:\n", results.len()));
+    for r in results {
+        let project = r
+            .project_name
+            .as_deref()
+            .unwrap_or("none");
+        let detail = match r.exec_status.as_str() {
+            "completed" => "completed",
+            "blocked" => "blocked",
+            "failed" => "failed",
+            "none" => "filed",
+            "skipped" => "skipped",
+            _ => &r.exec_status,
+        };
+        msg.push_str(&format!(
+            "\u{2022} `{}` \u{2192} **{}** ({}) \u{2014} {}\n",
+            r.source_file, project, r.action_type, detail
+        ));
+    }
+
+    let enriched = results.iter().filter(|r| r.enriched).count();
+    let unenriched = results.iter().filter(|r| !r.enriched && !r.failed).count();
+    let failed = results.iter().filter(|r| r.failed).count();
+    msg.push_str(&format!(
+        "\nEnriched: {} | Unenriched: {} | Failed: {}",
+        enriched, unenriched, failed
+    ));
+
+    // Discord limit is 2000 chars
+    if msg.len() > 2000 {
+        msg.truncate(1990);
+        msg.push_str("\n...(truncated)");
+    }
+
+    msg
+}
+
+fn post_to_discord(message: &str) -> Result<(), String> {
+    let token_file = std::env::var("DISCORD_TOKEN_FILE")
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+            format!("{}/.digest-bot-token", home)
+        });
+
+    let token = fs::read_to_string(&token_file)
+        .map_err(|e| format!("Cannot read token file {}: {}", token_file, e))?
+        .trim()
+        .to_string();
+
+    if token.is_empty() {
+        return Err("Bot token is empty".to_string());
+    }
+
+    let channel_id = std::env::var("DISCORD_CHANNEL_ID")
+        .unwrap_or_else(|_| "1477340656350396668".to_string());
+
+    let url = format!(
+        "https://discord.com/api/v10/channels/{}/messages",
+        channel_id
+    );
+
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bot {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "content": message }))
+        .send()
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("Discord API returned {}: {}", resp.status(), resp.text().unwrap_or_default()))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1176,7 +1275,7 @@ mod tests {
             std::env::remove_var("MOCK_OPENCLAW_FAIL");
             std::env::remove_var("MOCK_OPENCLAW_INVALID");
         }
-        run(Some(vault.root.to_string_lossy().to_string()), dry_run, 10)
+        run(Some(vault.root.to_string_lossy().to_string()), dry_run, 10, true)
     }
 
     #[test]
@@ -1264,7 +1363,7 @@ mod tests {
         );
 
         let code =
-            run(Some(vault.root.to_string_lossy().to_string()), false, 10);
+            run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
         assert_eq!(code, 0);
         assert!(
             vault.root.join("Inbox/Processed/fail-task.md").exists()
@@ -1382,7 +1481,7 @@ mod tests {
             std::env::remove_var("MOCK_OPENCLAW_INVALID");
         }
 
-        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 2);
+        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 2, true);
         assert_eq!(code, 0);
 
         // Only 2 processed, 1 remaining
@@ -1399,5 +1498,66 @@ mod tests {
             .filter(|e| e.path().is_file() && e.path().extension().is_some_and(|ext| ext == "md"))
             .count();
         assert_eq!(remaining_count, 1);
+    }
+
+    #[test]
+    fn test_discord_message_formatting() {
+        let results = vec![
+            ItemResult {
+                source_file: "fix-bug.md".to_string(),
+                project_name: Some("my-project".to_string()),
+                action_type: "repo-change".to_string(),
+                exec_status: "blocked".to_string(),
+                enriched: true,
+                failed: false,
+            },
+            ItemResult {
+                source_file: "research-ai.md".to_string(),
+                project_name: None,
+                action_type: "research".to_string(),
+                exec_status: "completed".to_string(),
+                enriched: true,
+                failed: false,
+            },
+            ItemResult {
+                source_file: "grocery-list.md".to_string(),
+                project_name: None,
+                action_type: "note".to_string(),
+                exec_status: "none".to_string(),
+                enriched: false,
+                failed: false,
+            },
+        ];
+
+        let msg = format_discord_message(&results);
+
+        assert!(msg.contains("**Daily Digest"));
+        assert!(msg.contains("Processed 3 items:"));
+        assert!(msg.contains("`fix-bug.md`"));
+        assert!(msg.contains("**my-project**"));
+        assert!(msg.contains("(repo-change)"));
+        assert!(msg.contains("blocked"));
+        assert!(msg.contains("`research-ai.md`"));
+        assert!(msg.contains("**none**"));
+        assert!(msg.contains("completed"));
+        assert!(msg.contains("`grocery-list.md`"));
+        assert!(msg.contains("filed"));
+        assert!(msg.contains("Enriched: 2"));
+        assert!(msg.contains("Unenriched: 1"));
+        assert!(msg.contains("Failed: 0"));
+    }
+
+    #[test]
+    fn test_discord_post_graceful_failure_missing_token() {
+        // SAFETY: tests run with --test-threads=1
+        unsafe {
+            std::env::set_var("DISCORD_TOKEN_FILE", "/nonexistent/token");
+        }
+        let result = post_to_discord("test message");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Cannot read token file"));
+        unsafe {
+            std::env::remove_var("DISCORD_TOKEN_FILE");
+        }
     }
 }
