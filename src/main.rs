@@ -1955,4 +1955,329 @@ mod tests {
         let envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(envelope["execution"]["status"], "skipped");
     }
+
+    // --- New project creation ---
+
+    #[test]
+    fn test_new_project_creates_dir_and_readme() {
+        let vault = TestVault::new();
+        vault.place_inbox(
+            "new-project.md",
+            "Project: home-automation\n\nResearch HomeKit integration. Compare HomeAssistant vs Homebridge.",
+        );
+
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+        assert!(vault.root.join("Inbox/Processed/new-project.md").exists());
+
+        // New project directory created with README and Inbox
+        let proj = vault.root.join("Projects/home-automation");
+        assert!(proj.exists());
+        assert!(proj.join("README.md").exists());
+        assert!(proj.join("Inbox").exists());
+
+        let readme = fs::read_to_string(proj.join("README.md")).unwrap();
+        assert!(readme.contains("home-automation"));
+
+        // Envelope should show new project
+        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let content = fs::read_to_string(envelope_file.path()).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(envelope["classification"]["project"]["kind"], "new");
+        assert_eq!(envelope["classification"]["project"]["name"], "home-automation");
+    }
+
+    // --- Research execution produces output file ---
+
+    #[test]
+    fn test_research_produces_output_file() {
+        let vault = TestVault::new();
+        vault.place_inbox(
+            "research-task.md",
+            "Project: home-automation\n\nResearch HomeKit integration. Compare HomeAssistant vs Homebridge.",
+        );
+
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+
+        // Should have a research output file
+        let research_files: Vec<_> = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().to_string_lossy().contains(".research.md"))
+            .collect();
+        assert_eq!(research_files.len(), 1);
+
+        let content = fs::read_to_string(research_files[0].path()).unwrap();
+        assert!(content.contains("## Summary"));
+        assert!(content.contains("## Findings"));
+
+        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let env_content = fs::read_to_string(envelope_file.path()).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&env_content).unwrap();
+        assert_eq!(envelope["execution"]["status"], "completed");
+    }
+
+    // --- Question handler ---
+
+    #[test]
+    fn test_question_produces_answer() {
+        let vault = TestVault::new();
+        vault.place_inbox(
+            "question.md",
+            "What is the difference between launchd and cron on macOS?",
+        );
+
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+        assert!(vault.root.join("Inbox/Processed/question.md").exists());
+
+        // Answer output file
+        let answer_files: Vec<_> = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().to_string_lossy().contains(".research.md"))
+            .collect();
+        assert_eq!(answer_files.len(), 1);
+
+        let content = fs::read_to_string(answer_files[0].path()).unwrap();
+        assert!(content.contains("## Answer"));
+
+        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let env_content = fs::read_to_string(envelope_file.path()).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&env_content).unwrap();
+        assert_eq!(envelope["action_type"]["action_type"], "question");
+    }
+
+    // --- Tag-based routing ---
+
+    #[test]
+    fn test_tag_routing_existing_project() {
+        let vault = TestVault::new();
+        vault.create_project("openclaw-daily-digest");
+        vault.place_inbox(
+            "tag-note.md",
+            "#project/openclaw-daily-digest\n\nRemember to update the README.",
+        );
+
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+        assert!(vault.root.join("Inbox/Processed/tag-note.md").exists());
+
+        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let content = fs::read_to_string(envelope_file.path()).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(envelope["classification"]["project"]["kind"], "existing");
+        assert_eq!(envelope["classification"]["project"]["name"], "openclaw-daily-digest");
+    }
+
+    // --- Unclassified note ---
+
+    #[test]
+    fn test_unclassified_note_falls_through_to_ai() {
+        let vault = TestVault::new();
+        vault.place_inbox(
+            "groceries.md",
+            "Pick up groceries on the way home.\nMilk, eggs, bread, coffee beans.",
+        );
+
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+        assert!(vault.root.join("Inbox/Processed/groceries.md").exists());
+
+        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let content = fs::read_to_string(envelope_file.path()).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        // Mock AI returns note for unclassified items
+        assert_eq!(envelope["action_type"]["action_type"], "note");
+        assert_eq!(envelope["execution"]["status"], "none");
+    }
+
+    // --- OpenClaw invalid JSON ---
+
+    #[test]
+    fn test_openclaw_invalid_json_unenriched() {
+        let vault = TestVault::new();
+        // SAFETY: tests run with --test-threads=1
+        unsafe {
+            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
+            std::env::set_var("MOCK_OPENCLAW_INVALID", "1");
+            std::env::set_var(
+                "DIGEST_POLICY",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("config/policy.json").to_str().unwrap(),
+            );
+        }
+        vault.place_inbox("invalid-task.md", "Some random note.");
+
+        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
+        assert_eq!(code, 0);
+        assert!(vault.root.join("Inbox/Processed/invalid-task.md").exists());
+
+        let envelope_file = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let content = fs::read_to_string(envelope_file.path()).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(envelope["status"], "unenriched");
+    }
+
+    // --- Log entry format ---
+
+    #[test]
+    fn test_log_entry_has_timestamp_and_fields() {
+        let vault = TestVault::new();
+        vault.create_project("openclaw-daily-digest");
+        vault.place_inbox(
+            "log-test.md",
+            "Project: openclaw-daily-digest\n\nFix something for log test.",
+        );
+
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+
+        let log_files: Vec<_> = fs::read_dir(vault.root.join("Logs"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(!log_files.is_empty());
+
+        let log_content = fs::read_to_string(log_files[0].path()).unwrap();
+        // Log format: [YYYY-MM-DD_HHMM] source -> report -> dest [status]
+        assert!(log_content.contains("log-test.md"));
+        assert!(log_content.contains("Processed/"));
+        assert!(log_content.contains("enriched"));
+        // Timestamp pattern
+        assert!(log_content.contains("[20"));
+    }
+
+    // --- Policy model selection ---
+
+    #[test]
+    fn test_policy_classification_uses_cheap_model() {
+        let vault = TestVault::new();
+        let model_log = vault.root.join("model-log.txt");
+        // SAFETY: tests run with --test-threads=1
+        unsafe {
+            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
+            std::env::set_var("MOCK_OPENCLAW_LOG", model_log.to_str().unwrap());
+            std::env::set_var(
+                "DIGEST_POLICY",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("config/policy.json").to_str().unwrap(),
+            );
+            std::env::remove_var("MOCK_OPENCLAW_FAIL");
+            std::env::remove_var("MOCK_OPENCLAW_INVALID");
+        }
+        vault.place_inbox("policy-test.md", "Pick up groceries.");
+
+        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
+        assert_eq!(code, 0);
+
+        let log = fs::read_to_string(&model_log).unwrap();
+        // At least one classification call should use cheap model (gpt-4o-mini)
+        assert!(log.contains("gpt-4o-mini"), "Expected cheap model in log:\n{}", log);
+    }
+
+    #[test]
+    fn test_policy_enrichment_uses_mid_model() {
+        let vault = TestVault::new();
+        let model_log = vault.root.join("model-log.txt");
+        // SAFETY: tests run with --test-threads=1
+        unsafe {
+            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
+            std::env::set_var("MOCK_OPENCLAW_LOG", model_log.to_str().unwrap());
+            std::env::set_var(
+                "DIGEST_POLICY",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("config/policy.json").to_str().unwrap(),
+            );
+            std::env::remove_var("MOCK_OPENCLAW_FAIL");
+            std::env::remove_var("MOCK_OPENCLAW_INVALID");
+        }
+        vault.place_inbox("enrich-test.md", "Some task for enrichment.");
+
+        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
+        assert_eq!(code, 0);
+
+        let log = fs::read_to_string(&model_log).unwrap();
+        assert!(log.contains("claude-sonnet"), "Expected mid model in log:\n{}", log);
+    }
+
+    #[test]
+    fn test_policy_deep_tag_uses_expensive_model() {
+        let vault = TestVault::new();
+        let model_log = vault.root.join("model-log.txt");
+        // SAFETY: tests run with --test-threads=1
+        unsafe {
+            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
+            std::env::set_var("MOCK_OPENCLAW_LOG", model_log.to_str().unwrap());
+            std::env::set_var(
+                "DIGEST_POLICY",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("config/policy.json").to_str().unwrap(),
+            );
+            std::env::remove_var("MOCK_OPENCLAW_FAIL");
+            std::env::remove_var("MOCK_OPENCLAW_INVALID");
+        }
+        vault.place_inbox(
+            "deep-task.md",
+            "#deep\n\nAnalyze the full architecture of the inbox orchestrator.",
+        );
+
+        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
+        assert_eq!(code, 0);
+
+        let log = fs::read_to_string(&model_log).unwrap();
+        assert!(log.contains("claude-opus"), "Expected expensive model in log:\n{}", log);
+    }
+
+    #[test]
+    fn test_policy_missing_file_works_without_model() {
+        let vault = TestVault::new();
+        let model_log = vault.root.join("model-log.txt");
+        // SAFETY: tests run with --test-threads=1
+        unsafe {
+            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
+            std::env::set_var("MOCK_OPENCLAW_LOG", model_log.to_str().unwrap());
+            std::env::set_var("DIGEST_POLICY", "/nonexistent/policy.json");
+            std::env::remove_var("MOCK_OPENCLAW_FAIL");
+            std::env::remove_var("MOCK_OPENCLAW_INVALID");
+        }
+        vault.place_inbox("no-policy.md", "Some task.");
+
+        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
+        assert_eq!(code, 0);
+        assert!(vault.root.join("Inbox/Processed/no-policy.md").exists());
+
+        // Model log should have empty lines (no model specified)
+        if model_log.exists() {
+            let log = fs::read_to_string(&model_log).unwrap();
+            let nonempty: Vec<_> = log.lines().filter(|l| !l.is_empty()).collect();
+            // With no policy, no --model args should be passed
+            assert!(nonempty.is_empty(), "Expected no model args but got: {:?}", nonempty);
+        }
+    }
 }
