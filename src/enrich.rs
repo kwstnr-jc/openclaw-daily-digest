@@ -42,27 +42,27 @@ pub fn enrich(task_content: &str, openclaw_cmd: &str) -> (bool, String, serde_js
 
     println!("Calling OpenClaw for JSON enrichment...");
     if let Some(output) = call_openclaw(openclaw_cmd, &args) {
-        if let Some(parsed) = extract_json(&output) {
-            if let Ok(enrichment) = serde_json::from_value::<Enrichment>(parsed.clone()) {
-                let mut rendered = String::from("## Planned Actions\n");
-                for action in &enrichment.planned_actions {
-                    rendered.push_str(&format!("- {}\n", action));
-                }
-                rendered.push_str("\n## Clarifying Questions\n");
-                if enrichment.clarifying_questions.is_empty() {
-                    rendered.push_str("- None\n");
-                } else {
-                    for q in &enrichment.clarifying_questions {
-                        rendered.push_str(&format!("- {}\n", q));
-                    }
-                }
-                rendered.push_str(&format!(
-                    "\n## Suggested Next Step\n- {}\n",
-                    enrichment.next_step
-                ));
-                println!("Enrichment received and parsed as JSON.");
-                return (true, rendered, parsed);
+        if let Some(parsed) = extract_json(&output)
+            && let Ok(enrichment) = serde_json::from_value::<Enrichment>(parsed.clone())
+        {
+            let mut rendered = String::from("## Planned Actions\n");
+            for action in &enrichment.planned_actions {
+                rendered.push_str(&format!("- {}\n", action));
             }
+            rendered.push_str("\n## Clarifying Questions\n");
+            if enrichment.clarifying_questions.is_empty() {
+                rendered.push_str("- None\n");
+            } else {
+                for q in &enrichment.clarifying_questions {
+                    rendered.push_str(&format!("- {}\n", q));
+                }
+            }
+            rendered.push_str(&format!(
+                "\n## Suggested Next Step\n- {}\n",
+                enrichment.next_step
+            ));
+            println!("Enrichment received and parsed as JSON.");
+            return (true, rendered, parsed);
         }
         println!("JSON parse failed. Using fallback.");
     }

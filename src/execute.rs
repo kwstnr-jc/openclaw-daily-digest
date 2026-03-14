@@ -83,15 +83,15 @@ fn execute_research(
     );
     args.push("--message".to_string());
     args.push(prompt);
-    if let Some(output) = call_openclaw(openclaw_cmd, &args) {
-        if !output.is_empty() {
-            let _ = fs::write(&exec_file, &output);
-            let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
-            println!("Research report written: {}", exec_file.display());
-            let json =
-                serde_json::json!({"handler":"research","status":"completed","output_file":fname});
-            return ("completed".to_string(), json, Some(fname));
-        }
+    if let Some(output) = call_openclaw(openclaw_cmd, &args)
+        && !output.is_empty()
+    {
+        let _ = fs::write(&exec_file, &output);
+        let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
+        println!("Research report written: {}", exec_file.display());
+        let json =
+            serde_json::json!({"handler":"research","status":"completed","output_file":fname});
+        return ("completed".to_string(), json, Some(fname));
     }
     let json = serde_json::json!({"handler":"research","status":"failed","reason":"OpenClaw returned empty response"});
     ("failed".to_string(), json, None)
@@ -129,15 +129,15 @@ fn execute_question(
     );
     args.push("--message".to_string());
     args.push(prompt);
-    if let Some(output) = call_openclaw(openclaw_cmd, &args) {
-        if !output.is_empty() {
-            let _ = fs::write(&exec_file, &output);
-            let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
-            println!("Answer report written: {}", exec_file.display());
-            let json =
-                serde_json::json!({"handler":"question","status":"completed","output_file":fname});
-            return ("completed".to_string(), json, Some(fname));
-        }
+    if let Some(output) = call_openclaw(openclaw_cmd, &args)
+        && !output.is_empty()
+    {
+        let _ = fs::write(&exec_file, &output);
+        let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
+        println!("Answer report written: {}", exec_file.display());
+        let json =
+            serde_json::json!({"handler":"question","status":"completed","output_file":fname});
+        return ("completed".to_string(), json, Some(fname));
     }
     let json = serde_json::json!({"handler":"question","status":"failed","reason":"OpenClaw returned empty response"});
     ("failed".to_string(), json, None)
@@ -180,7 +180,7 @@ fn execute_repo_change(
         .filter(|c| c.is_alphanumeric() || *c == '-')
         .collect::<String>()
         .to_lowercase();
-    let short_ts = &timestamp.replace('-', "").replace('_', "");
+    let short_ts = &timestamp.replace(['-', '_'], "");
     let short_ts = if short_ts.len() >= 8 {
         &short_ts[4..8]
     } else {

@@ -55,8 +55,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), std::io::Error> {
 }
 
 pub fn write_envelope(path: &Path, envelope: &Envelope) -> Result<(), std::io::Error> {
-    let json = serde_json::to_string_pretty(envelope)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(envelope).map_err(std::io::Error::other)?;
     atomic_write(path, json.as_bytes())
 }
 

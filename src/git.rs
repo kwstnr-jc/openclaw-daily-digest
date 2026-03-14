@@ -30,14 +30,13 @@ pub fn git_default_branch(repo_dir: &Path) -> String {
         .args(["symbolic-ref", "refs/remotes/origin/HEAD", "--short"])
         .current_dir(repo_dir)
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return branch
-                .strip_prefix("origin/")
-                .unwrap_or(&branch)
-                .to_string();
-        }
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return branch
+            .strip_prefix("origin/")
+            .unwrap_or(&branch)
+            .to_string();
     }
     if run_git(repo_dir, &["rev-parse", "--verify", "main"]).is_ok() {
         return "main".to_string();

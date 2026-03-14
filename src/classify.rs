@@ -129,19 +129,18 @@ pub fn classify_project(
 
         println!("Calling OpenClaw for project classification...");
         if let Some(output) = call_openclaw(openclaw_cmd, &args) {
-            if let Some(parsed) = extract_json(&output) {
-                if let Ok(classification) =
+            if let Some(parsed) = extract_json(&output)
+                && let Ok(classification) =
                     serde_json::from_value::<ProjectClassification>(parsed.clone())
-                {
-                    let kind = classification.project.kind.clone();
-                    let name = classification.project.name.clone();
-                    println!(
-                        "AI classification: kind={} name={}",
-                        kind,
-                        name.as_deref().unwrap_or("")
-                    );
-                    return (kind, name, "ai".to_string(), parsed);
-                }
+            {
+                let kind = classification.project.kind.clone();
+                let name = classification.project.name.clone();
+                println!(
+                    "AI classification: kind={} name={}",
+                    kind,
+                    name.as_deref().unwrap_or("")
+                );
+                return (kind, name, "ai".to_string(), parsed);
             }
             println!("AI classification JSON invalid, skipping.");
         }
@@ -217,13 +216,13 @@ pub fn classify_action_type(
 
         println!("Calling OpenClaw for action type classification...");
         if let Some(output) = call_openclaw(openclaw_cmd, &args) {
-            if let Some(parsed) = extract_json(&output) {
-                if let Ok(at) = serde_json::from_value::<ActionTypeClassification>(parsed.clone()) {
-                    let valid = ["repo-change", "research", "ops", "question", "note"];
-                    if valid.contains(&at.action_type.as_str()) {
-                        println!("AI action type: {}", at.action_type);
-                        return (at.action_type, "ai".to_string(), parsed);
-                    }
+            if let Some(parsed) = extract_json(&output)
+                && let Ok(at) = serde_json::from_value::<ActionTypeClassification>(parsed.clone())
+            {
+                let valid = ["repo-change", "research", "ops", "question", "note"];
+                if valid.contains(&at.action_type.as_str()) {
+                    println!("AI action type: {}", at.action_type);
+                    return (at.action_type, "ai".to_string(), parsed);
                 }
             }
             println!("AI action type JSON invalid, defaulting to note.");

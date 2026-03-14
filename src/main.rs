@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 mod classify;
 mod discord;
 mod enrich;
@@ -150,7 +152,7 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
     );
 
     // Check if more items remain
-    if let Some(_) = find_first_inbox_item(&inbox) {
+    if find_first_inbox_item(&inbox).is_some() {
         println!("More items remaining. Run again to continue.");
     }
 
@@ -222,18 +224,18 @@ fn process_one_item(
     );
 
     // Create new project directory if classified as "new"
-    if project_kind == "new" {
-        if let Some(ref name) = project_name {
-            let new_proj = projects_dir.join(name);
-            if !new_proj.exists() {
-                fs::create_dir_all(new_proj.join("Inbox")).ok();
-                let readme = format!(
-                    "# {}\n\nCreated: {}\nSource: {}\n\n## Description\n\n(Auto-created by inbox orchestrator. Update this with project details.)\n",
-                    name, today, original_name
-                );
-                fs::write(new_proj.join("README.md"), readme).ok();
-                println!("Created new project: {}", new_proj.display());
-            }
+    if project_kind == "new"
+        && let Some(ref name) = project_name
+    {
+        let new_proj = projects_dir.join(name);
+        if !new_proj.exists() {
+            fs::create_dir_all(new_proj.join("Inbox")).ok();
+            let readme = format!(
+                "# {}\n\nCreated: {}\nSource: {}\n\n## Description\n\n(Auto-created by inbox orchestrator. Update this with project details.)\n",
+                name, today, original_name
+            );
+            fs::write(new_proj.join("README.md"), readme).ok();
+            println!("Created new project: {}", new_proj.display());
         }
     }
 
