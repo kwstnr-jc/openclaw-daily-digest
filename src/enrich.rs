@@ -1,10 +1,7 @@
 use crate::types::Enrichment;
 use crate::util::{call_openclaw, extract_json, which_exists};
 
-pub fn enrich(
-    task_content: &str,
-    openclaw_cmd: &str,
-) -> (bool, String, serde_json::Value) {
+pub fn enrich(task_content: &str, openclaw_cmd: &str) -> (bool, String, serde_json::Value) {
     let fallback = "## Planned Actions\n\
         - (LLM enrichment unavailable — manual review required)\n\n\
         ## Clarifying Questions\n\
@@ -46,9 +43,7 @@ pub fn enrich(
     println!("Calling OpenClaw for JSON enrichment...");
     if let Some(output) = call_openclaw(openclaw_cmd, &args) {
         if let Some(parsed) = extract_json(&output) {
-            if let Ok(enrichment) =
-                serde_json::from_value::<Enrichment>(parsed.clone())
-            {
+            if let Ok(enrichment) = serde_json::from_value::<Enrichment>(parsed.clone()) {
                 let mut rendered = String::from("## Planned Actions\n");
                 for action in &enrichment.planned_actions {
                     rendered.push_str(&format!("- {}\n", action));

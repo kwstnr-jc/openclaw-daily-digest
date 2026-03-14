@@ -35,9 +35,7 @@ pub fn extract_json(raw: &str) -> Option<serde_json::Value> {
             json_lines.push(line);
             if trimmed.ends_with('}') {
                 let candidate = json_lines.join("\n");
-                if let Ok(v) =
-                    serde_json::from_str::<serde_json::Value>(&candidate)
-                {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&candidate) {
                     return Some(v);
                 }
             }
@@ -56,10 +54,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-pub fn write_envelope(
-    path: &Path,
-    envelope: &Envelope,
-) -> Result<(), std::io::Error> {
+pub fn write_envelope(path: &Path, envelope: &Envelope) -> Result<(), std::io::Error> {
     let json = serde_json::to_string_pretty(envelope)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     atomic_write(path, json.as_bytes())
@@ -75,8 +70,7 @@ pub fn append_log(
     status: &str,
 ) -> Result<(), std::io::Error> {
     let logfile = logs_dir.join(format!("{}.md", today));
-    let report_name =
-        report.file_name().unwrap_or_default().to_string_lossy();
+    let report_name = report.file_name().unwrap_or_default().to_string_lossy();
     let line = format!(
         "[{}] {} -> {} -> {} [{}]\n",
         timestamp, source, report_name, dest, status

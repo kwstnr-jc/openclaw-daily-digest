@@ -79,13 +79,10 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
     let processed = inbox.join("Processed");
     let failed = inbox.join("Failed");
     let projects_dir = root.join("Projects");
-    let envelope_dir = PathBuf::from(
-        std::env::var("DIGEST_ENVELOPE_DIR")
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/agent".to_string());
-                format!("{}/data/digest-envelopes", home)
-            }),
-    );
+    let envelope_dir = PathBuf::from(std::env::var("DIGEST_ENVELOPE_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/agent".to_string());
+        format!("{}/data/digest-envelopes", home)
+    }));
 
     // Ensure directories exist
     for dir in [&outbox, &logs, &processed, &failed, &envelope_dir] {
@@ -98,12 +95,15 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
         .unwrap_or(30);
     rotate_logs(&logs, retention_days);
 
-    let openclaw_cmd =
-        std::env::var("OPENCLAW_CMD").unwrap_or_else(|_| "openclaw".to_string());
+    let openclaw_cmd = std::env::var("OPENCLAW_CMD").unwrap_or_else(|_| "openclaw".to_string());
 
     // Process items in a loop
     let mut results: Vec<ItemResult> = Vec::new();
-    let limit = if max_items == 0 { usize::MAX } else { max_items };
+    let limit = if max_items == 0 {
+        usize::MAX
+    } else {
+        max_items
+    };
 
     loop {
         if results.len() >= limit {
@@ -243,8 +243,7 @@ fn process_one_item(
     println!("Action type: {} method={}", action_type, action_type_method);
 
     // --- LLM Enrichment ---
-    let (enriched, enrichment_rendered, enrichment_json) =
-        enrich(&task_content, openclaw_cmd);
+    let (enriched, enrichment_rendered, enrichment_json) = enrich(&task_content, openclaw_cmd);
 
     // --- Execution Handlers ---
     let (exec_result, exec_json, exec_file, pr_url) = execute_handler(
@@ -280,7 +279,15 @@ fn process_one_item(
     // Write report atomically
     if let Err(e) = atomic_write(&report_path, report_content.as_bytes()) {
         eprintln!("Cannot write report: {}", e);
-        let _ = append_log(logs, &today, &timestamp, &original_name, &report_path, "Failed/", "error");
+        let _ = append_log(
+            logs,
+            &today,
+            &timestamp,
+            &original_name,
+            &report_path,
+            "Failed/",
+            "error",
+        );
         if !dry_run {
             move_file(inbox_file, &failed.join(&original_name));
         }
@@ -314,7 +321,15 @@ fn process_one_item(
         eprintln!("Cannot write envelope: {}", e);
     }
 
-    let _ = append_log(logs, &today, &timestamp, &original_name, &report_path, "Processed/", envelope_status);
+    let _ = append_log(
+        logs,
+        &today,
+        &timestamp,
+        &original_name,
+        &report_path,
+        "Processed/",
+        envelope_status,
+    );
 
     if !dry_run {
         move_file(inbox_file, &processed.join(&original_name));
@@ -325,7 +340,10 @@ fn process_one_item(
     if dry_run {
         println!("Dry run — inbox item NOT moved.");
     } else {
-        println!("Inbox item moved to: {}", processed.join(&original_name).display());
+        println!(
+            "Inbox item moved to: {}",
+            processed.join(&original_name).display()
+        );
     }
 
     ItemResult {
@@ -357,11 +375,8 @@ mod tests {
     impl TestVault {
         fn new() -> Self {
             let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let root = std::env::temp_dir().join(format!(
-                "digest-test-{}-{}",
-                std::process::id(),
-                id
-            ));
+            let root =
+                std::env::temp_dir().join(format!("digest-test-{}-{}", std::process::id(), id));
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(root.join("Inbox/Processed")).unwrap();
             fs::create_dir_all(root.join("Inbox/Failed")).unwrap();
@@ -377,8 +392,7 @@ mod tests {
         }
 
         fn create_project(&self, name: &str) {
-            fs::create_dir_all(self.root.join("Projects").join(name))
-                .unwrap();
+            fs::create_dir_all(self.root.join("Projects").join(name)).unwrap();
         }
     }
 
@@ -389,10 +403,7 @@ mod tests {
                 use std::os::unix::fs::PermissionsExt;
                 let outbox = self.root.join("Outbox");
                 if outbox.exists() {
-                    let _ = fs::set_permissions(
-                        &outbox,
-                        fs::Permissions::from_mode(0o755),
-                    );
+                    let _ = fs::set_permissions(&outbox, fs::Permissions::from_mode(0o755));
                 }
             }
             let _ = fs::remove_dir_all(&self.root);
@@ -401,17 +412,13 @@ mod tests {
 
     fn mock_path() -> PathBuf {
         let manifest = env!("CARGO_MANIFEST_DIR");
-        PathBuf::from(manifest)
-            .join("tests/helpers/mock-openclaw.sh")
+        PathBuf::from(manifest).join("tests/helpers/mock-openclaw.sh")
     }
 
     fn run_with_vault(vault: &TestVault, dry_run: bool) -> i32 {
         // SAFETY: tests run with --test-threads=1 so no concurrent env mutation
         unsafe {
-            std::env::set_var(
-                "OPENCLAW_CMD",
-                mock_path().to_str().unwrap(),
-            );
+            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
             std::env::set_var(
                 "DIGEST_ENVELOPE_DIR",
                 vault.root.join("Envelopes").to_str().unwrap(),
@@ -420,7 +427,12 @@ mod tests {
             std::env::remove_var("MOCK_OPENCLAW_INVALID");
             std::env::remove_var("MOCK_OPENCLAW_LOG");
         }
-        run(Some(vault.root.to_string_lossy().to_string()), dry_run, 10, true)
+        run(
+            Some(vault.root.to_string_lossy().to_string()),
+            dry_run,
+            10,
+            true,
+        )
     }
 
     fn find_envelope(vault: &TestVault) -> serde_json::Value {
@@ -437,10 +449,7 @@ mod tests {
         let vault = TestVault::new();
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
-        assert_eq!(
-            fs::read_dir(vault.root.join("Outbox")).unwrap().count(),
-            0
-        );
+        assert_eq!(fs::read_dir(vault.root.join("Outbox")).unwrap().count(), 0);
     }
 
     #[test]
@@ -469,18 +478,10 @@ mod tests {
         // Envelope is in Envelopes dir with correct fields
         let envelope = find_envelope(&vault);
         assert_eq!(envelope["status"], "enriched");
-        assert_eq!(
-            envelope["classification"]["project"]["kind"],
-            "existing"
-        );
+        assert_eq!(envelope["classification"]["project"]["kind"], "existing");
 
         // Log exists
-        assert!(
-            fs::read_dir(vault.root.join("Logs"))
-                .unwrap()
-                .count()
-                > 0
-        );
+        assert!(fs::read_dir(vault.root.join("Logs")).unwrap().count() > 0);
     }
 
     #[test]
@@ -488,10 +489,7 @@ mod tests {
         let vault = TestVault::new();
         // SAFETY: tests run with --test-threads=1 so no concurrent env mutation
         unsafe {
-            std::env::set_var(
-                "OPENCLAW_CMD",
-                mock_path().to_str().unwrap(),
-            );
+            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
             std::env::set_var("MOCK_OPENCLAW_FAIL", "1");
             std::env::set_var(
                 "DIGEST_ENVELOPE_DIR",
@@ -504,12 +502,14 @@ mod tests {
             "Project: openclaw-daily-digest\n\nFix something.",
         );
 
-        let code =
-            run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
-        assert_eq!(code, 0);
-        assert!(
-            vault.root.join("Inbox/Processed/fail-task.md").exists()
+        let code = run(
+            Some(vault.root.to_string_lossy().to_string()),
+            false,
+            10,
+            true,
         );
+        assert_eq!(code, 0);
+        assert!(vault.root.join("Inbox/Processed/fail-task.md").exists());
 
         let envelope = find_envelope(&vault);
         assert_eq!(envelope["status"], "unenriched");
@@ -518,17 +518,12 @@ mod tests {
     #[test]
     fn test_dry_run_no_move() {
         let vault = TestVault::new();
-        vault.place_inbox(
-            "dry-task.md",
-            "Just a note about groceries.",
-        );
+        vault.place_inbox("dry-task.md", "Just a note about groceries.");
 
         let code = run_with_vault(&vault, true);
         assert_eq!(code, 0);
         assert!(vault.root.join("Inbox/dry-task.md").exists());
-        assert!(
-            !vault.root.join("Inbox/Processed/dry-task.md").exists()
-        );
+        assert!(!vault.root.join("Inbox/Processed/dry-task.md").exists());
     }
 
     #[test]
@@ -539,11 +534,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(
-                vault.root.join("Outbox"),
-                fs::Permissions::from_mode(0o000),
-            )
-            .unwrap();
+            fs::set_permissions(vault.root.join("Outbox"), fs::Permissions::from_mode(0o000))
+                .unwrap();
         }
 
         let code = run_with_vault(&vault, false);
@@ -552,11 +544,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(
-                vault.root.join("Outbox"),
-                fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
+            fs::set_permissions(vault.root.join("Outbox"), fs::Permissions::from_mode(0o755))
+                .unwrap();
         }
 
         assert!(vault.root.join("Inbox/Failed/io-task.md").exists());
@@ -586,15 +575,11 @@ mod tests {
         assert_eq!(remaining.len(), 0);
 
         // Outbox should have 3 digest reports
-        let outbox_count = fs::read_dir(vault.root.join("Outbox"))
-            .unwrap()
-            .count();
+        let outbox_count = fs::read_dir(vault.root.join("Outbox")).unwrap().count();
         assert_eq!(outbox_count, 3);
 
         // Envelopes dir should have 3 envelope files
-        let envelope_count = fs::read_dir(vault.root.join("Envelopes"))
-            .unwrap()
-            .count();
+        let envelope_count = fs::read_dir(vault.root.join("Envelopes")).unwrap().count();
         assert_eq!(envelope_count, 3);
     }
 
@@ -616,7 +601,12 @@ mod tests {
             std::env::remove_var("MOCK_OPENCLAW_INVALID");
         }
 
-        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 2, true);
+        let code = run(
+            Some(vault.root.to_string_lossy().to_string()),
+            false,
+            2,
+            true,
+        );
         assert_eq!(code, 0);
 
         // Only 2 processed, 1 remaining
@@ -717,10 +707,7 @@ mod tests {
     #[test]
     fn test_ops_executed_with_output() {
         let vault = TestVault::new();
-        vault.place_inbox(
-            "install-thing.md",
-            "Install htop via brew.\nlaunchctl list",
-        );
+        vault.place_inbox("install-thing.md", "Install htop via brew.\nlaunchctl list");
 
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
@@ -749,7 +736,12 @@ mod tests {
 
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
-        assert!(vault.root.join("Inbox/Processed/dangerous-task.md").exists());
+        assert!(
+            vault
+                .root
+                .join("Inbox/Processed/dangerous-task.md")
+                .exists()
+        );
 
         let envelope = find_envelope(&vault);
         assert_eq!(envelope["execution"]["status"], "skipped");
@@ -758,7 +750,10 @@ mod tests {
     #[test]
     fn test_new_project_creates_dir_and_readme() {
         let vault = TestVault::new();
-        vault.place_inbox("new-proj.md", "Project: home-automation\n\nResearch HomeKit on a Pi. Compare the options.");
+        vault.place_inbox(
+            "new-proj.md",
+            "Project: home-automation\n\nResearch HomeKit on a Pi. Compare the options.",
+        );
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
         let proj = vault.root.join("Projects/home-automation");
@@ -767,16 +762,26 @@ mod tests {
         assert!(proj.join("Inbox").exists());
         let envelope = find_envelope(&vault);
         assert_eq!(envelope["classification"]["project"]["kind"], "new");
-        assert_eq!(envelope["classification"]["project"]["name"], "home-automation");
+        assert_eq!(
+            envelope["classification"]["project"]["name"],
+            "home-automation"
+        );
     }
 
     #[test]
     fn test_research_handler_produces_output() {
         let vault = TestVault::new();
-        vault.place_inbox("research.md", "Compare HomeAssistant vs Homebridge for HomeKit.");
+        vault.place_inbox(
+            "research.md",
+            "Compare HomeAssistant vs Homebridge for HomeKit.",
+        );
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
-        let research: Vec<_> = fs::read_dir(vault.root.join("Outbox")).unwrap().filter_map(|e| e.ok()).filter(|e| e.path().to_string_lossy().contains(".research.md")).collect();
+        let research: Vec<_> = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().to_string_lossy().contains(".research.md"))
+            .collect();
         assert_eq!(research.len(), 1);
         let content = fs::read_to_string(research[0].path()).unwrap();
         assert!(content.contains("## Summary"));
@@ -788,7 +793,11 @@ mod tests {
         vault.place_inbox("q.md", "What is the difference between launchd and cron?");
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
-        let answers: Vec<_> = fs::read_dir(vault.root.join("Outbox")).unwrap().filter_map(|e| e.ok()).filter(|e| e.path().to_string_lossy().contains(".research.md")).collect();
+        let answers: Vec<_> = fs::read_dir(vault.root.join("Outbox"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().to_string_lossy().contains(".research.md"))
+            .collect();
         assert_eq!(answers.len(), 1);
         let content = fs::read_to_string(answers[0].path()).unwrap();
         assert!(content.contains("## Answer"));
@@ -800,12 +809,18 @@ mod tests {
     fn test_tag_routing_existing_project() {
         let vault = TestVault::new();
         vault.create_project("openclaw-daily-digest");
-        vault.place_inbox("tag.md", "#project/openclaw-daily-digest\n\nUpdate the README.");
+        vault.place_inbox(
+            "tag.md",
+            "#project/openclaw-daily-digest\n\nUpdate the README.",
+        );
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
         let envelope = find_envelope(&vault);
         assert_eq!(envelope["classification"]["project"]["kind"], "existing");
-        assert_eq!(envelope["classification"]["project"]["name"], "openclaw-daily-digest");
+        assert_eq!(
+            envelope["classification"]["project"]["name"],
+            "openclaw-daily-digest"
+        );
     }
 
     #[test]
@@ -831,7 +846,12 @@ mod tests {
             );
         }
         vault.place_inbox("invalid.md", "Some random note.");
-        let code = run(Some(vault.root.to_string_lossy().to_string()), false, 10, true);
+        let code = run(
+            Some(vault.root.to_string_lossy().to_string()),
+            false,
+            10,
+            true,
+        );
         assert_eq!(code, 0);
         let envelope = find_envelope(&vault);
         assert_eq!(envelope["status"], "unenriched");
@@ -841,10 +861,16 @@ mod tests {
     fn test_log_entry_format() {
         let vault = TestVault::new();
         vault.create_project("openclaw-daily-digest");
-        vault.place_inbox("log-test.md", "Project: openclaw-daily-digest\n\nFix something.");
+        vault.place_inbox(
+            "log-test.md",
+            "Project: openclaw-daily-digest\n\nFix something.",
+        );
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
-        let logs: Vec<_> = fs::read_dir(vault.root.join("Logs")).unwrap().filter_map(|e| e.ok()).collect();
+        let logs: Vec<_> = fs::read_dir(vault.root.join("Logs"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
         assert!(!logs.is_empty());
         let content = fs::read_to_string(logs[0].path()).unwrap();
         assert!(content.contains("log-test.md"));
@@ -882,5 +908,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
-
 }

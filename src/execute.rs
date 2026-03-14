@@ -30,8 +30,15 @@ pub fn execute_handler(
             (s, j, f, None)
         }
         "repo-change" => execute_repo_change(
-            task_content, outbox, timestamp, stem, openclaw_cmd,
-            projects_dir, project_name, project_kind, enrichment_rendered,
+            task_content,
+            outbox,
+            timestamp,
+            stem,
+            openclaw_cmd,
+            projects_dir,
+            project_name,
+            project_kind,
+            enrichment_rendered,
         ),
         "ops" => {
             let (s, j, f) = execute_ops(task_content, outbox, timestamp, stem, openclaw_cmd);
@@ -45,7 +52,10 @@ pub fn execute_handler(
 }
 
 fn execute_research(
-    task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
+    task_content: &str,
+    outbox: &Path,
+    timestamp: &str,
+    stem: &str,
     openclaw_cmd: &str,
 ) -> (String, serde_json::Value, Option<String>) {
     let exec_file = outbox.join(format!("{}-{}.research.md", timestamp, stem));
@@ -55,8 +65,11 @@ fn execute_research(
         return ("skipped".to_string(), json, None);
     }
     let mut args = vec![
-        "agent".to_string(), "--agent".to_string(), "main".to_string(),
-        "--timeout".to_string(), "120".to_string(),
+        "agent".to_string(),
+        "--agent".to_string(),
+        "main".to_string(),
+        "--timeout".to_string(),
+        "120".to_string(),
     ];
     let prompt = format!(
         "You are a research assistant. Given the task below, produce a structured research report.\n\n\
@@ -65,7 +78,8 @@ fn execute_research(
          ## Findings\n(bulleted list of key findings)\n\n\
          ## Sources\n(bulleted list — use placeholder URLs for now)\n\n\
          ## Next Steps\n(bulleted list of recommended follow-up actions)\n\n\
-         Task:\n{}", task_content
+         Task:\n{}",
+        task_content
     );
     args.push("--message".to_string());
     args.push(prompt);
@@ -74,7 +88,8 @@ fn execute_research(
             let _ = fs::write(&exec_file, &output);
             let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
             println!("Research report written: {}", exec_file.display());
-            let json = serde_json::json!({"handler":"research","status":"completed","output_file":fname});
+            let json =
+                serde_json::json!({"handler":"research","status":"completed","output_file":fname});
             return ("completed".to_string(), json, Some(fname));
         }
     }
@@ -83,7 +98,10 @@ fn execute_research(
 }
 
 fn execute_question(
-    task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
+    task_content: &str,
+    outbox: &Path,
+    timestamp: &str,
+    stem: &str,
     openclaw_cmd: &str,
 ) -> (String, serde_json::Value, Option<String>) {
     let exec_file = outbox.join(format!("{}-{}.research.md", timestamp, stem));
@@ -93,8 +111,11 @@ fn execute_question(
         return ("skipped".to_string(), json, None);
     }
     let mut args = vec![
-        "agent".to_string(), "--agent".to_string(), "main".to_string(),
-        "--timeout".to_string(), "120".to_string(),
+        "agent".to_string(),
+        "--agent".to_string(),
+        "main".to_string(),
+        "--timeout".to_string(),
+        "120".to_string(),
     ];
     let prompt = format!(
         "You are an expert assistant. Given the question below, produce a structured answer.\n\n\
@@ -103,7 +124,8 @@ fn execute_question(
          ## Details\n(supporting explanation with bullet points)\n\n\
          ## Sources\n(bulleted list — use placeholder URLs for now)\n\n\
          ## Follow-up Questions\n(bulleted list of related questions worth exploring)\n\n\
-         Question:\n{}", task_content
+         Question:\n{}",
+        task_content
     );
     args.push("--message".to_string());
     args.push(prompt);
@@ -112,7 +134,8 @@ fn execute_question(
             let _ = fs::write(&exec_file, &output);
             let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
             println!("Answer report written: {}", exec_file.display());
-            let json = serde_json::json!({"handler":"question","status":"completed","output_file":fname});
+            let json =
+                serde_json::json!({"handler":"question","status":"completed","output_file":fname});
             return ("completed".to_string(), json, Some(fname));
         }
     }
@@ -121,10 +144,15 @@ fn execute_question(
 }
 
 fn execute_repo_change(
-    task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
+    task_content: &str,
+    outbox: &Path,
+    timestamp: &str,
+    stem: &str,
     openclaw_cmd: &str,
-    projects_dir: &Path, project_name: Option<&str>,
-    project_kind: &str, enrichment_rendered: &str,
+    projects_dir: &Path,
+    project_name: Option<&str>,
+    project_kind: &str,
+    enrichment_rendered: &str,
 ) -> (String, serde_json::Value, Option<String>, Option<String>) {
     println!("Executing repo-change handler...");
 
@@ -134,7 +162,8 @@ fn execute_repo_change(
         None => {
             let reason = "Cannot determine target repo";
             println!("{}", reason);
-            let json = serde_json::json!({"handler":"repo-change","status":"skipped","reason":reason});
+            let json =
+                serde_json::json!({"handler":"repo-change","status":"skipped","reason":reason});
             return ("skipped".to_string(), json, None, None);
         }
     };
@@ -146,16 +175,24 @@ fn execute_repo_change(
     }
 
     // 2. Create feature branch
-    let slug: String = stem.chars()
+    let slug: String = stem
+        .chars()
         .filter(|c| c.is_alphanumeric() || *c == '-')
         .collect::<String>()
         .to_lowercase();
     let short_ts = &timestamp.replace('-', "").replace('_', "");
-    let short_ts = if short_ts.len() >= 8 { &short_ts[4..8] } else { short_ts.as_str() };
+    let short_ts = if short_ts.len() >= 8 {
+        &short_ts[4..8]
+    } else {
+        short_ts.as_str()
+    };
     let branch_name = format!("agent/{}-{}", slug, short_ts);
 
     let default_branch = git_default_branch(&repo_dir);
-    println!("Default branch: {}, creating: {}", default_branch, branch_name);
+    println!(
+        "Default branch: {}, creating: {}",
+        default_branch, branch_name
+    );
 
     let _ = run_git(&repo_dir, &["fetch", "origin"]);
     if run_git(&repo_dir, &["checkout", &default_branch]).is_err() {
@@ -170,14 +207,19 @@ fn execute_repo_change(
 
     // 3. Execute code change via OpenClaw
     let mut args = vec![
-        "agent".to_string(), "--agent".to_string(), "default".to_string(),
-        "--timeout".to_string(), "300".to_string(),
+        "agent".to_string(),
+        "--agent".to_string(),
+        "default".to_string(),
+        "--timeout".to_string(),
+        "300".to_string(),
     ];
     args.push("--message".to_string());
     args.push(format!(
         "You are working in the repository at {}. Execute the following task.\n\n\
          Task:\n{}\n\nPlanned actions:\n{}",
-        repo_dir.display(), task_content, enrichment_rendered
+        repo_dir.display(),
+        task_content,
+        enrichment_rendered
     ));
 
     println!("Calling OpenClaw for code change...");
@@ -204,10 +246,18 @@ fn execute_repo_change(
     }
 
     let _ = run_git(&repo_dir, &["add", "-A"]);
-    let first_line = task_content.lines().find(|l| !l.trim().is_empty()).unwrap_or("agent task");
+    let first_line = task_content
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("agent task");
     let commit_msg = format!(
         "feat: {}\n\nAutonomously executed by openclaw-daily-digest.\nSource: {}",
-        first_line.trim().trim_start_matches("Project:").trim().to_lowercase(), stem
+        first_line
+            .trim()
+            .trim_start_matches("Project:")
+            .trim()
+            .to_lowercase(),
+        stem
     );
     if run_git(&repo_dir, &["commit", "-m", &commit_msg]).is_err() {
         let _ = run_git(&repo_dir, &["checkout", &default_branch]);
@@ -225,7 +275,11 @@ fn execute_repo_change(
 
     // 5. Open PR via gh
     let pr_title = first_line.trim().trim_start_matches("Project:").trim();
-    let pr_title = if pr_title.len() > 70 { &pr_title[..70] } else { pr_title };
+    let pr_title = if pr_title.len() > 70 {
+        &pr_title[..70]
+    } else {
+        pr_title
+    };
     let pr_body = format!(
         "## Task\n\n{}\n\n## Planned Actions\n\n{}\n\n---\n\n_Auto-generated by openclaw-daily-digest agent._",
         task_content, enrichment_rendered
@@ -237,15 +291,24 @@ fn execute_repo_change(
     let exec_log = format!(
         "# Repo-Change Execution\n\n- **Repo:** {}\n- **Branch:** {}\n- **PR:** {}\n- **Status:** {}\n\n\
          ## OpenClaw Output\n\n```\n{}\n```\n",
-        repo_dir.display(), branch_name,
+        repo_dir.display(),
+        branch_name,
         pr_url.as_deref().unwrap_or("(none)"),
-        if pr_url.is_some() { "completed" } else { "pushed" },
+        if pr_url.is_some() {
+            "completed"
+        } else {
+            "pushed"
+        },
         openclaw_output.as_deref().unwrap_or("(no output)"),
     );
     let _ = fs::write(&exec_file, &exec_log);
     let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
 
-    let status = if pr_url.is_some() { "completed" } else { "pushed" };
+    let status = if pr_url.is_some() {
+        "completed"
+    } else {
+        "pushed"
+    };
     let json = serde_json::json!({
         "handler": "repo-change", "status": status,
         "branch": branch_name, "pr_url": pr_url, "output_file": fname,
@@ -256,7 +319,10 @@ fn execute_repo_change(
 }
 
 fn execute_ops(
-    task_content: &str, outbox: &Path, timestamp: &str, stem: &str,
+    task_content: &str,
+    outbox: &Path,
+    timestamp: &str,
+    stem: &str,
     openclaw_cmd: &str,
 ) -> (String, serde_json::Value, Option<String>) {
     println!("Executing ops handler...");
@@ -268,11 +334,22 @@ fn execute_ops(
 
     // Safety check: scan task for dangerous patterns
     let lower = task_content.to_lowercase();
-    let dangerous = ["rm -rf", "rm -r /", "ssh-keygen", "ssh_key",
-        "credential", "passwd", ".ssh/authorized_keys", "sudoers"];
+    let dangerous = [
+        "rm -rf",
+        "rm -r /",
+        "ssh-keygen",
+        "ssh_key",
+        "credential",
+        "passwd",
+        ".ssh/authorized_keys",
+        "sudoers",
+    ];
     for pattern in &dangerous {
         if lower.contains(pattern) {
-            println!("Skipped: potentially unsafe ops task (matched: {})", pattern);
+            println!(
+                "Skipped: potentially unsafe ops task (matched: {})",
+                pattern
+            );
             let json = serde_json::json!({
                 "handler": "ops", "status": "skipped",
                 "reason": format!("Skipped: potentially unsafe (matched: {})", pattern),
@@ -282,15 +359,19 @@ fn execute_ops(
     }
 
     let mut args = vec![
-        "agent".to_string(), "--agent".to_string(), "default".to_string(),
-        "--timeout".to_string(), "120".to_string(),
+        "agent".to_string(),
+        "--agent".to_string(),
+        "default".to_string(),
+        "--timeout".to_string(),
+        "120".to_string(),
     ];
     args.push("--message".to_string());
     args.push(format!(
         "Execute the following ops task. Only use safe commands \
          (brew install/upgrade, launchctl load/unload, mkdir, cp, ln, chmod). \
          NEVER use rm -rf, never delete data, never modify SSH keys or credentials.\n\n\
-         Task:\n{}", task_content
+         Task:\n{}",
+        task_content
     ));
 
     println!("Calling OpenClaw for ops task...");
@@ -301,12 +382,20 @@ fn execute_ops(
         "# Ops Execution Log\n\n## Task\n\n{}\n\n## Output\n\n```\n{}\n```\n\n## Status\n\n{}\n",
         task_content,
         output.as_deref().unwrap_or("(no output)"),
-        if output.is_some() { "completed" } else { "failed" },
+        if output.is_some() {
+            "completed"
+        } else {
+            "failed"
+        },
     );
     let _ = fs::write(&exec_file, &exec_log);
     let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
 
-    let status = if output.is_some() { "completed" } else { "failed" };
+    let status = if output.is_some() {
+        "completed"
+    } else {
+        "failed"
+    };
     let json = serde_json::json!({"handler": "ops", "status": status, "output_file": fname});
     (status.to_string(), json, Some(fname))
 }

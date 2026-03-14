@@ -218,9 +218,7 @@ pub fn classify_action_type(
         println!("Calling OpenClaw for action type classification...");
         if let Some(output) = call_openclaw(openclaw_cmd, &args) {
             if let Some(parsed) = extract_json(&output) {
-                if let Ok(at) =
-                    serde_json::from_value::<ActionTypeClassification>(parsed.clone())
-                {
+                if let Ok(at) = serde_json::from_value::<ActionTypeClassification>(parsed.clone()) {
                     let valid = ["repo-change", "research", "ops", "question", "note"];
                     if valid.contains(&at.action_type.as_str()) {
                         println!("AI action type: {}", at.action_type);
