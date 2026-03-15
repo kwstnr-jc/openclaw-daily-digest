@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Mock OpenClaw CLI for testing.
-# Responds to "agent" subcommand with canned JSON based on prompt content.
+# Mock LLM CLI for testing.
+# Responds to prompts with canned JSON based on prompt content.
 # Set MOCK_OPENCLAW_FAIL=1 to simulate failure.
 # Set MOCK_OPENCLAW_INVALID=1 to return invalid JSON.
 
@@ -16,10 +16,11 @@ if [[ "${MOCK_OPENCLAW_INVALID:-}" == "1" ]]; then
   exit 0
 fi
 
-# Parse args — capture --message
+# Parse args — capture -p (print mode) or --message
 MESSAGE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -p) MESSAGE="$2"; shift 2 ;;
     --message) MESSAGE="$2"; shift 2 ;;
     *) shift ;;
   esac

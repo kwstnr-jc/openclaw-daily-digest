@@ -6,8 +6,23 @@ use std::process::Command;
 
 use crate::types::Envelope;
 
+#[allow(dead_code)]
 pub fn call_openclaw(cmd: &str, args: &[String]) -> Option<String> {
     let output = Command::new(cmd).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if stdout.trim().is_empty() {
+        return None;
+    }
+    Some(stdout)
+}
+
+/// Call an LLM CLI with a prompt. Uses `LLM_CMD` env var (default: `claude`).
+/// The command is invoked as: `<cmd> -p <prompt>`
+pub fn call_llm(cmd: &str, prompt: &str) -> Option<String> {
+    let output = Command::new(cmd).args(["-p", prompt]).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -54,11 +69,13 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn write_envelope(path: &Path, envelope: &Envelope) -> Result<(), std::io::Error> {
     let json = serde_json::to_string_pretty(envelope).map_err(std::io::Error::other)?;
     atomic_write(path, json.as_bytes())
 }
 
+#[allow(dead_code)]
 pub fn append_log(
     logs_dir: &Path,
     today: &str,

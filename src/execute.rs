@@ -83,15 +83,15 @@ fn execute_research(
     );
     args.push("--message".to_string());
     args.push(prompt);
-    if let Some(output) = call_openclaw(openclaw_cmd, &args)
-        && !output.is_empty()
-    {
-        let _ = fs::write(&exec_file, &output);
-        let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
-        println!("Research report written: {}", exec_file.display());
-        let json =
-            serde_json::json!({"handler":"research","status":"completed","output_file":fname});
-        return ("completed".to_string(), json, Some(fname));
+    if let Some(output) = call_openclaw(openclaw_cmd, &args) {
+        if !output.is_empty() {
+            let _ = fs::write(&exec_file, &output);
+            let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
+            println!("Research report written: {}", exec_file.display());
+            let json =
+                serde_json::json!({"handler":"research","status":"completed","output_file":fname});
+            return ("completed".to_string(), json, Some(fname));
+        }
     }
     let json = serde_json::json!({"handler":"research","status":"failed","reason":"OpenClaw returned empty response"});
     ("failed".to_string(), json, None)
@@ -129,15 +129,15 @@ fn execute_question(
     );
     args.push("--message".to_string());
     args.push(prompt);
-    if let Some(output) = call_openclaw(openclaw_cmd, &args)
-        && !output.is_empty()
-    {
-        let _ = fs::write(&exec_file, &output);
-        let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
-        println!("Answer report written: {}", exec_file.display());
-        let json =
-            serde_json::json!({"handler":"question","status":"completed","output_file":fname});
-        return ("completed".to_string(), json, Some(fname));
+    if let Some(output) = call_openclaw(openclaw_cmd, &args) {
+        if !output.is_empty() {
+            let _ = fs::write(&exec_file, &output);
+            let fname = exec_file.file_name().unwrap().to_string_lossy().to_string();
+            println!("Answer report written: {}", exec_file.display());
+            let json =
+                serde_json::json!({"handler":"question","status":"completed","output_file":fname});
+            return ("completed".to_string(), json, Some(fname));
+        }
     }
     let json = serde_json::json!({"handler":"question","status":"failed","reason":"OpenClaw returned empty response"});
     ("failed".to_string(), json, None)
@@ -156,7 +156,6 @@ fn execute_repo_change(
 ) -> (String, serde_json::Value, Option<String>, Option<String>) {
     println!("Executing repo-change handler...");
 
-    // 1. Determine target repo
     let repo_dir = match find_repo_dir(projects_dir, project_name, project_kind) {
         Some(d) => d,
         None => {
@@ -174,13 +173,12 @@ fn execute_repo_change(
         return ("skipped".to_string(), json, None, None);
     }
 
-    // 2. Create feature branch
     let slug: String = stem
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '-')
         .collect::<String>()
         .to_lowercase();
-    let short_ts = &timestamp.replace(['-', '_'], "");
+    let short_ts = &timestamp.replace('-', "").replace('_', "");
     let short_ts = if short_ts.len() >= 8 {
         &short_ts[4..8]
     } else {
@@ -205,7 +203,6 @@ fn execute_repo_change(
         return ("failed".to_string(), json, None, None);
     }
 
-    // 3. Execute code change via OpenClaw
     let mut args = vec![
         "agent".to_string(),
         "--agent".to_string(),
@@ -232,7 +229,6 @@ fn execute_repo_change(
         return ("failed".to_string(), json, None, None);
     }
 
-    // 4. Check for changes, commit and push
     let has_changes = run_git(&repo_dir, &["diff", "--quiet"]).is_err()
         || run_git(&repo_dir, &["diff", "--cached", "--quiet"]).is_err()
         || !git_untracked_files(&repo_dir).is_empty();
@@ -273,7 +269,6 @@ fn execute_repo_change(
     }
     println!("Pushed branch: {}", branch_name);
 
-    // 5. Open PR via gh
     let pr_title = first_line.trim().trim_start_matches("Project:").trim();
     let pr_title = if pr_title.len() > 70 {
         &pr_title[..70]
@@ -286,7 +281,6 @@ fn execute_repo_change(
     );
     let pr_url = create_pull_request(&repo_dir, pr_title, &pr_body, &default_branch);
 
-    // Write execution log
     let exec_file = outbox.join(format!("{}-{}.repo-change.md", timestamp, stem));
     let exec_log = format!(
         "# Repo-Change Execution\n\n- **Repo:** {}\n- **Branch:** {}\n- **PR:** {}\n- **Status:** {}\n\n\
@@ -332,7 +326,6 @@ fn execute_ops(
         return ("skipped".to_string(), json, None);
     }
 
-    // Safety check: scan task for dangerous patterns
     let lower = task_content.to_lowercase();
     let dangerous = [
         "rm -rf",

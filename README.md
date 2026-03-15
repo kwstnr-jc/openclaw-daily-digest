@@ -1,49 +1,32 @@
 # openclaw-daily-digest
 
-Deterministic inbox orchestrator for OpenClaw. Reads Markdown items from a
-vault inbox, classifies them (project routing + action type), enriches via LLM,
-executes safe handlers, and writes structured reports with full audit trail.
+Deterministic inbox orchestrator. Reads Markdown items from an Obsidian inbox,
+classifies them (project routing + action type), enriches via LLM, and pushes
+tasks to the [task-orchestrator](https://github.com/kwstnr-jc/task-orchestrator) API.
 
 ## Why this approach
 
 - **Deterministic outer loop.** The orchestrator owns all state transitions,
-  file I/O, and error handling. AI is a pure function dependency — never relied
+  file I/O, and error handling. AI is a pure function dependency -- never relied
   upon for correctness.
-- **Auditable.** Every run produces an `envelope.json` (single source of truth),
-  a digest report, and a log entry.
-- **Safe autonomy.** Research and question tasks execute automatically.
-  Repo-change and ops tasks are blocked pending approval.
+- **API-first.** Classified tasks are pushed to the task-orchestrator API for
+  tracking and project management.
 - **Incremental.** Each phase is a working, shippable product.
-
-## Current stage
-
-All 8 phases complete:
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 1 | Deterministic file loop (read, report, log) | Done |
-| 2 | Processing pipeline (Processed/Failed, structured report, envelope.json) | Done |
-| 3 | LLM enrichment (planned actions, questions, next step via OpenClaw) | Done |
-| 4 | Multi-level classification (project routing + action type) | Done |
-| 5 | Execution handlers (research/question/blocked) | Done |
-| 6 | Testing harness (16 bats tests + 5 Rust tests) | Done |
-| 7 | Model selection policy (cheap/mid/expensive tiers) | Done |
-| 8 | Rust rewrite + dual trigger (launchd + Discord entrypoint) | Done |
 
 ## Structure
 
 ```
-src/main.rs                 # Rust orchestrator (primary implementation)
-bin/run-digest.sh           # thin wrapper → Rust binary (fallback → bash)
-bin/run-digest-bash.sh      # bash reference implementation
-bin/digest-now.sh           # on-demand trigger for Discord/manual use
-config/policy.json          # model selection policy (cheap/mid/expensive)
-config/example.env          # configuration template (no secrets)
-docs/spec.md                # orchestrator ↔ AI interface specification
-docs/runbook.md             # operational docs, trigger modes, troubleshooting
-tests/orchestrator.bats     # 16 bats integration tests
-tests/fixtures/             # test inbox items for all classification paths
-tests/helpers/              # mock OpenClaw script
+src/main.rs                 # Rust orchestrator
+src/api.rs                  # HTTP client for task-orchestrator API
+src/classify.rs             # Project + action type classification
+src/enrich.rs               # LLM enrichment
+src/report.rs               # Digest report builder
+src/types.rs                # Shared types
+src/util.rs                 # File I/O utilities
+src/discord.rs              # Discord webhook posting
+src/execute.rs              # (dead code) Execution handlers
+src/git.rs                  # (dead code) Git operations
+tests/helpers/mock-openclaw.sh  # Mock LLM script for tests
 ```
 
 ## Quick start
@@ -52,53 +35,59 @@ tests/helpers/              # mock OpenClaw script
 # Build the Rust binary
 cargo build --release
 
+# Create inbox/outbox directories
+mkdir -p /path/to/inbox /path/to/outbox
+
 # Create a test inbox item
-echo "# Test task" > /Users/Shared/agent-vault/Agent/Inbox/test.md
+echo "# Test task" > /path/to/inbox/test.md
 
 # Run the digest
-bin/run-digest.sh
+target/release/openclaw-daily-digest run --inbox /path/to/inbox --outbox /path/to/outbox
 
-# Or directly
-target/release/openclaw-daily-digest run
-
-# Verify outputs
-ls /Users/Shared/agent-vault/Agent/Outbox/
-cat /Users/Shared/agent-vault/Agent/Logs/$(date +%F).md
+# With API integration
+API_URL=https://your-api.example.com API_KEY=your-key \
+  target/release/openclaw-daily-digest run --inbox /path/to/inbox --outbox /path/to/outbox
 ```
 
-## Trigger modes
+## CLI
 
-- **Scheduled:** launchd plist runs daily at 08:00 (`~/Library/LaunchAgents/com.kevinwuestner.digest.plist`)
-- **On-demand:** `bin/digest-now.sh` for Discord or manual execution
-- **CLI:** `target/release/openclaw-daily-digest run [--root <path>] [--dry-run]`
+```
+target/release/openclaw-daily-digest run \
+  --inbox <path>      # Required: source directory for *.md items
+  --outbox <path>     # Required: output directory for digest reports
+  --dry-run           # Don't move inbox items after processing
+  --max-items <n>     # Max items per run (default: 10, 0 = unlimited)
+  --no-discord        # Skip Discord posting
+```
+
+## Environment variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DIGEST_INBOX_DIR` | Inbox directory (alternative to `--inbox`) | (required) |
+| `DIGEST_OUTBOX_DIR` | Outbox directory (alternative to `--outbox`) | (required) |
+| `LLM_CMD` | Path to LLM CLI binary | `claude` |
+| `API_URL` | Task orchestrator API base URL | (empty = skip push) |
+| `API_KEY` | API key for task orchestrator | (empty) |
+| `DIGEST_LOG_RETENTION_DAYS` | Days to keep log files | `30` |
+| `DISCORD_TOKEN_FILE` | Path to Discord bot token file | `~/.digest-bot-token` |
+| `DISCORD_CHANNEL_ID` | Discord channel ID for summaries | (hardcoded default) |
 
 ## Testing
 
 ```bash
-# Bash integration tests (16 tests)
-tests/run-tests.sh
-
-# Rust unit tests (5 tests)
+# Run all tests (single-threaded required)
 cargo test -- --test-threads=1
-```
 
-## Vault paths (runtime only — not in this repo)
+# Lint
+cargo clippy --all-targets -- -D warnings
 
-```
-ROOT=/Users/Shared/agent-vault/Agent
-├── Inbox/              # source items (*.md)
-│   ├── Processed/      # successfully processed items
-│   └── Failed/         # items that failed due to IO errors
-├── Outbox/             # digest reports + envelope.json files
-├── Logs/               # daily log files (YYYY-MM-DD.md)
-└── Projects/           # project directories for routing
+# Format
+cargo fmt --check
 ```
 
 ## Design principle
 
-> Claude Code writes scripts. OpenClaw executes scripts.
->
-> The agent never writes its own scripts at runtime. All code lives in this
-> repo, is reviewed, committed, and pushed before execution.
-
-See [docs/runbook.md](docs/runbook.md) for operational details and [docs/spec.md](docs/spec.md) for the interface specification.
+> The orchestrator never writes its own scripts at runtime. All code lives in this
+> repo, is reviewed, committed, and pushed before execution. AI is a pure function
+> dependency -- the deterministic outer loop handles all state transitions.

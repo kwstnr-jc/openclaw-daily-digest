@@ -28,6 +28,7 @@ pub struct ActionTypeClassification {
     pub suggested_repo: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize, Clone, Debug)]
 pub struct Envelope {
     pub version: String,

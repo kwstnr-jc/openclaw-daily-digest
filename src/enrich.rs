@@ -1,7 +1,7 @@
 use crate::types::Enrichment;
-use crate::util::{call_openclaw, extract_json, which_exists};
+use crate::util::{call_llm, extract_json, which_exists};
 
-pub fn enrich(task_content: &str, openclaw_cmd: &str) -> (bool, String, serde_json::Value) {
+pub fn enrich(task_content: &str, llm_cmd: &str) -> (bool, String, serde_json::Value) {
     let fallback = "## Planned Actions\n\
         - (LLM enrichment unavailable — manual review required)\n\n\
         ## Clarifying Questions\n\
@@ -10,18 +10,10 @@ pub fn enrich(task_content: &str, openclaw_cmd: &str) -> (bool, String, serde_js
         - Review inbox item manually and determine actions"
         .to_string();
 
-    if !which_exists(openclaw_cmd) {
+    if !which_exists(llm_cmd) {
         println!("Enrichment unavailable or invalid, using fallback.");
         return (false, fallback, serde_json::Value::Null);
     }
-
-    let mut args = vec![
-        "agent".to_string(),
-        "--agent".to_string(),
-        "main".to_string(),
-        "--timeout".to_string(),
-        "120".to_string(),
-    ];
 
     let prompt = format!(
         "You are a strict JSON API. Given the task below, return ONLY a single JSON object. \
@@ -37,11 +29,9 @@ pub fn enrich(task_content: &str, openclaw_cmd: &str) -> (bool, String, serde_js
          Task:\n{}",
         task_content
     );
-    args.push("--message".to_string());
-    args.push(prompt);
 
-    println!("Calling OpenClaw for JSON enrichment...");
-    if let Some(output) = call_openclaw(openclaw_cmd, &args) {
+    println!("Calling LLM for JSON enrichment...");
+    if let Some(output) = call_llm(llm_cmd, &prompt) {
         if let Some(parsed) = extract_json(&output)
             && let Ok(enrichment) = serde_json::from_value::<Enrichment>(parsed.clone())
         {
