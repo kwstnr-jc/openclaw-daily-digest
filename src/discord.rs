@@ -50,11 +50,10 @@ pub fn format_discord_message(results: &[ItemResult]) -> String {
 }
 
 pub fn post_to_discord(message: &str) -> Result<(), String> {
-    let token_file = std::env::var("DISCORD_TOKEN_FILE")
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-            format!("{}/.digest-bot-token", home)
-        });
+    let token_file = std::env::var("DISCORD_TOKEN_FILE").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        format!("{}/.digest-bot-token", home)
+    });
 
     let token = fs::read_to_string(&token_file)
         .map_err(|e| format!("Cannot read token file {}: {}", token_file, e))?
@@ -65,8 +64,8 @@ pub fn post_to_discord(message: &str) -> Result<(), String> {
         return Err("Bot token is empty".to_string());
     }
 
-    let channel_id = std::env::var("DISCORD_CHANNEL_ID")
-        .unwrap_or_else(|_| "1477340656350396668".to_string());
+    let channel_id =
+        std::env::var("DISCORD_CHANNEL_ID").unwrap_or_else(|_| "1477340656350396668".to_string());
 
     let url = format!(
         "https://discord.com/api/v10/channels/{}/messages",
@@ -85,6 +84,10 @@ pub fn post_to_discord(message: &str) -> Result<(), String> {
     if resp.status().is_success() {
         Ok(())
     } else {
-        Err(format!("Discord API returned {}: {}", resp.status(), resp.text().unwrap_or_default()))
+        Err(format!(
+            "Discord API returned {}: {}",
+            resp.status(),
+            resp.text().unwrap_or_default()
+        ))
     }
 }
