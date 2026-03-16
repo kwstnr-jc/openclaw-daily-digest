@@ -4,21 +4,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::types::Envelope;
-
-#[allow(dead_code)]
-pub fn call_openclaw(cmd: &str, args: &[String]) -> Option<String> {
-    let output = Command::new(cmd).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    if stdout.trim().is_empty() {
-        return None;
-    }
-    Some(stdout)
-}
-
 /// Call an LLM CLI with a prompt. Uses `LLM_CMD` env var (default: `claude`).
 /// The command is invoked as: `<cmd> -p <prompt>`
 pub fn call_llm(cmd: &str, prompt: &str) -> Option<String> {
@@ -66,36 +51,6 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), std::io::Error> {
     file.write_all(data)?;
     file.sync_all()?;
     fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub fn write_envelope(path: &Path, envelope: &Envelope) -> Result<(), std::io::Error> {
-    let json = serde_json::to_string_pretty(envelope).map_err(std::io::Error::other)?;
-    atomic_write(path, json.as_bytes())
-}
-
-#[allow(dead_code)]
-pub fn append_log(
-    logs_dir: &Path,
-    today: &str,
-    timestamp: &str,
-    source: &str,
-    report: &Path,
-    dest: &str,
-    status: &str,
-) -> Result<(), std::io::Error> {
-    let logfile = logs_dir.join(format!("{}.md", today));
-    let report_name = report.file_name().unwrap_or_default().to_string_lossy();
-    let line = format!(
-        "[{}] {} -> {} -> {} [{}]\n",
-        timestamp, source, report_name, dest, status
-    );
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(logfile)?;
-    file.write_all(line.as_bytes())?;
     Ok(())
 }
 

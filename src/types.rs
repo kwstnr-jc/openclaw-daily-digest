@@ -28,21 +28,6 @@ pub struct ActionTypeClassification {
     pub suggested_repo: Option<String>,
 }
 
-#[allow(dead_code)]
-#[derive(Serialize, Clone, Debug)]
-pub struct Envelope {
-    pub version: String,
-    pub timestamp: String,
-    pub source_file: String,
-    pub task_text: String,
-    pub classification: serde_json::Value,
-    pub action_type: serde_json::Value,
-    pub planning: serde_json::Value,
-    pub enrichment: serde_json::Value,
-    pub execution: serde_json::Value,
-    pub status: String,
-}
-
 /// Result of processing a single inbox item.
 #[derive(Debug)]
 pub struct ItemResult {

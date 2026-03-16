@@ -2,15 +2,6 @@ mod api;
 mod classify;
 mod discord;
 mod enrich;
-#[allow(
-    dead_code,
-    clippy::too_many_arguments,
-    clippy::collapsible_if,
-    clippy::collapsible_str_replace
-)]
-mod execute;
-#[allow(dead_code)]
-mod git;
 mod report;
 mod types;
 mod util;
