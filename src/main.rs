@@ -1,10 +1,7 @@
-#![allow(clippy::too_many_arguments)]
-
+mod api;
 mod classify;
 mod discord;
 mod enrich;
-mod execute;
-mod git;
 mod report;
 mod types;
 mod util;
@@ -14,15 +11,14 @@ use clap::Parser;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::api::{ApiConfig, map_task_type};
 use crate::classify::{classify_action_type, classify_project};
 use crate::discord::{format_discord_message, post_to_discord};
 use crate::enrich::enrich;
-use crate::execute::execute_handler;
 use crate::report::build_report;
-use crate::types::{Envelope, ItemResult};
+use crate::types::ItemResult;
 use crate::util::{
-    append_log, atomic_write, find_first_inbox_item, move_file, read_first_n_lines, rotate_logs,
-    write_envelope,
+    atomic_write, find_first_inbox_item, move_file, read_first_n_lines, rotate_logs,
 };
 
 // ---------------------------------------------------------------------------
@@ -34,9 +30,13 @@ use crate::util::{
 enum Cli {
     /// Process inbox items
     Run {
-        /// Override the vault root directory
-        #[arg(long, env = "DIGEST_ROOT")]
-        root: Option<String>,
+        /// Inbox directory (source items)
+        #[arg(long, env = "DIGEST_INBOX_DIR")]
+        inbox: String,
+
+        /// Outbox directory (digest reports)
+        #[arg(long, env = "DIGEST_OUTBOX_DIR")]
+        outbox: String,
 
         /// Do everything except move the inbox file
         #[arg(long)]
@@ -60,34 +60,33 @@ fn main() {
     let cli = Cli::parse();
     match cli {
         Cli::Run {
-            root,
+            inbox,
+            outbox,
             dry_run,
             max_items,
             no_discord,
         } => {
-            let exit_code = run(root, dry_run, max_items, no_discord);
+            let exit_code = run(&inbox, &outbox, dry_run, max_items, no_discord);
             std::process::exit(exit_code);
         }
     }
 }
 
-fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discord: bool) -> i32 {
-    let root = PathBuf::from(
-        root_override.unwrap_or_else(|| "/Users/Shared/agent-vault/Agent".to_string()),
-    );
-    let inbox = root.join("Inbox");
-    let outbox = root.join("Outbox");
-    let logs = root.join("Logs");
+fn run(
+    inbox_dir: &str,
+    outbox_dir: &str,
+    dry_run: bool,
+    max_items: usize,
+    no_discord: bool,
+) -> i32 {
+    let inbox = PathBuf::from(inbox_dir);
+    let outbox = PathBuf::from(outbox_dir);
+    let logs = outbox.join("Logs");
     let processed = inbox.join("Processed");
     let failed = inbox.join("Failed");
-    let projects_dir = root.join("Projects");
-    let envelope_dir = PathBuf::from(std::env::var("DIGEST_ENVELOPE_DIR").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/agent".to_string());
-        format!("{}/data/digest-envelopes", home)
-    }));
 
     // Ensure directories exist
-    for dir in [&outbox, &logs, &processed, &failed, &envelope_dir] {
+    for dir in [&outbox, &logs, &processed, &failed] {
         fs::create_dir_all(dir).ok();
     }
 
@@ -97,7 +96,12 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
         .unwrap_or(30);
     rotate_logs(&logs, retention_days);
 
-    let openclaw_cmd = std::env::var("OPENCLAW_CMD").unwrap_or_else(|_| "openclaw".to_string());
+    let llm_cmd = std::env::var("LLM_CMD").unwrap_or_else(|_| "claude".to_string());
+
+    let api_config = ApiConfig::from_env();
+    if api_config.is_none() {
+        println!("API_URL not set — tasks will not be pushed to the API.");
+    }
 
     // Process items in a loop
     let mut results: Vec<ItemResult> = Vec::new();
@@ -123,12 +127,10 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
         let result = process_one_item(
             &inbox_file,
             &outbox,
-            &envelope_dir,
-            &logs,
             &processed,
             &failed,
-            &projects_dir,
-            &openclaw_cmd,
+            &llm_cmd,
+            api_config.as_ref(),
             dry_run,
         );
         results.push(result);
@@ -175,12 +177,10 @@ fn run(root_override: Option<String>, dry_run: bool, max_items: usize, no_discor
 fn process_one_item(
     inbox_file: &Path,
     outbox: &Path,
-    envelope_dir: &Path,
-    logs: &Path,
     processed: &Path,
     failed: &Path,
-    projects_dir: &Path,
-    openclaw_cmd: &str,
+    llm_cmd: &str,
+    api_config: Option<&ApiConfig>,
     dry_run: bool,
 ) -> ItemResult {
     let original_name = inbox_file
@@ -191,9 +191,7 @@ fn process_one_item(
     let stem = original_name.strip_suffix(".md").unwrap_or(&original_name);
     let now = Local::now();
     let timestamp = now.format("%Y-%m-%d_%H%M").to_string();
-    let today = now.format("%Y-%m-%d").to_string();
     let report_path = outbox.join(format!("{}-{}-digest.md", timestamp, stem));
-    let envelope_path = envelope_dir.join(format!("{}-{}.envelope.json", timestamp, stem));
 
     // Read inbox content (first 200 lines)
     let task_content = match read_first_n_lines(inbox_file, 200) {
@@ -213,9 +211,13 @@ fn process_one_item(
         }
     };
 
+    // Use a temporary empty dir for project classification (no local projects dir)
+    let tmp_projects = std::env::temp_dir().join("digest-empty-projects");
+    fs::create_dir_all(&tmp_projects).ok();
+
     // --- Project Classification (Level 1) ---
-    let (project_kind, project_name, classification_method, classification_json) =
-        classify_project(&task_content, projects_dir, openclaw_cmd);
+    let (project_kind, project_name, classification_method, _classification_json) =
+        classify_project(&task_content, &tmp_projects, llm_cmd);
     println!(
         "Project routing: kind={} name={} method={}",
         project_kind,
@@ -223,44 +225,52 @@ fn process_one_item(
         classification_method
     );
 
-    // Create new project directory if classified as "new"
-    if project_kind == "new"
-        && let Some(ref name) = project_name
-    {
-        let new_proj = projects_dir.join(name);
-        if !new_proj.exists() {
-            fs::create_dir_all(new_proj.join("Inbox")).ok();
-            let readme = format!(
-                "# {}\n\nCreated: {}\nSource: {}\n\n## Description\n\n(Auto-created by inbox orchestrator. Update this with project details.)\n",
-                name, today, original_name
-            );
-            fs::write(new_proj.join("README.md"), readme).ok();
-            println!("Created new project: {}", new_proj.display());
-        }
-    }
-
     // --- Action Type Classification (Level 2) ---
-    let (action_type, action_type_method, action_type_json) =
-        classify_action_type(&task_content, openclaw_cmd);
+    let (action_type, action_type_method, _action_type_json) =
+        classify_action_type(&task_content, llm_cmd);
     println!("Action type: {} method={}", action_type, action_type_method);
 
     // --- LLM Enrichment ---
-    let (enriched, enrichment_rendered, enrichment_json) = enrich(&task_content, openclaw_cmd);
+    let (enriched, enrichment_rendered, enrichment_json) = enrich(&task_content, llm_cmd);
 
-    // --- Execution Handlers ---
-    let (exec_result, exec_json, exec_file, pr_url) = execute_handler(
-        &action_type,
-        &task_content,
-        outbox,
-        &timestamp,
-        stem,
-        openclaw_cmd,
-        projects_dir,
-        project_name.as_deref(),
-        &project_kind,
-        &enrichment_rendered,
-    );
-    println!("Execution: {}", exec_result);
+    // --- Push to API ---
+    let mut api_pushed = false;
+    if let Some(config) = api_config {
+        // Ensure project exists if one was classified
+        let project_id = if let Some(ref name) = project_name {
+            match config.ensure_project(name) {
+                Ok(project) => {
+                    println!("Project '{}' ready (ID: {})", name, project.id);
+                    Some(project.id)
+                }
+                Err(e) => {
+                    eprintln!("Failed to ensure project '{}': {}", name, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Create task
+        let title = task_content
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or(stem)
+            .trim()
+            .to_string();
+        let task_type = map_task_type(&action_type);
+
+        match config.push_task(&title, &task_content, task_type, project_id.as_deref()) {
+            Ok(task) => {
+                println!("Task pushed to API (ID: {})", task.id);
+                api_pushed = true;
+            }
+            Err(e) => {
+                eprintln!("Failed to push task to API: {}", e);
+            }
+        }
+    }
 
     // --- Build report ---
     let report_content = build_report(
@@ -271,25 +281,15 @@ fn process_one_item(
         &classification_method,
         &action_type,
         &action_type_method,
-        &exec_result,
-        exec_file.as_deref(),
         &enrichment_rendered,
         enriched,
         &enrichment_json,
+        api_pushed,
     );
 
     // Write report atomically
     if let Err(e) = atomic_write(&report_path, report_content.as_bytes()) {
         eprintln!("Cannot write report: {}", e);
-        let _ = append_log(
-            logs,
-            &today,
-            &timestamp,
-            &original_name,
-            &report_path,
-            "Failed/",
-            "error",
-        );
         if !dry_run {
             move_file(inbox_file, &failed.join(&original_name));
         }
@@ -304,41 +304,11 @@ fn process_one_item(
         };
     }
 
-    let envelope_status = if enriched { "enriched" } else { "unenriched" };
-
-    let envelope = Envelope {
-        version: "1.0.0".to_string(),
-        timestamp: timestamp.clone(),
-        source_file: original_name.clone(),
-        task_text: task_content.clone(),
-        classification: classification_json,
-        action_type: action_type_json,
-        planning: serde_json::Value::Null,
-        enrichment: enrichment_json,
-        execution: exec_json,
-        status: envelope_status.to_string(),
-    };
-
-    if let Err(e) = write_envelope(&envelope_path, &envelope) {
-        eprintln!("Cannot write envelope: {}", e);
-    }
-
-    let _ = append_log(
-        logs,
-        &today,
-        &timestamp,
-        &original_name,
-        &report_path,
-        "Processed/",
-        envelope_status,
-    );
-
     if !dry_run {
         move_file(inbox_file, &processed.join(&original_name));
     }
 
     println!("Digest written: {}", report_path.display());
-    println!("Envelope written: {}", envelope_path.display());
     if dry_run {
         println!("Dry run — inbox item NOT moved.");
     } else {
@@ -352,10 +322,14 @@ fn process_one_item(
         source_file: original_name,
         project_name,
         action_type,
-        exec_status: exec_result,
+        exec_status: if api_pushed {
+            "pushed".to_string()
+        } else {
+            "filed".to_string()
+        },
         enriched,
         failed: false,
-        pr_url,
+        pr_url: None,
     }
 }
 
@@ -371,7 +345,8 @@ mod tests {
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     struct TestVault {
-        root: PathBuf,
+        inbox: PathBuf,
+        outbox: PathBuf,
     }
 
     impl TestVault {
@@ -380,35 +355,33 @@ mod tests {
             let root =
                 std::env::temp_dir().join(format!("digest-test-{}-{}", std::process::id(), id));
             let _ = fs::remove_dir_all(&root);
-            fs::create_dir_all(root.join("Inbox/Processed")).unwrap();
-            fs::create_dir_all(root.join("Inbox/Failed")).unwrap();
-            fs::create_dir_all(root.join("Outbox")).unwrap();
-            fs::create_dir_all(root.join("Envelopes")).unwrap();
-            fs::create_dir_all(root.join("Logs")).unwrap();
-            fs::create_dir_all(root.join("Projects")).unwrap();
-            TestVault { root }
+            let inbox = root.join("Inbox");
+            let outbox = root.join("Outbox");
+            fs::create_dir_all(inbox.join("Processed")).unwrap();
+            fs::create_dir_all(inbox.join("Failed")).unwrap();
+            fs::create_dir_all(&outbox).unwrap();
+            TestVault { inbox, outbox }
         }
 
         fn place_inbox(&self, name: &str, content: &str) {
-            fs::write(self.root.join("Inbox").join(name), content).unwrap();
-        }
-
-        fn create_project(&self, name: &str) {
-            fs::create_dir_all(self.root.join("Projects").join(name)).unwrap();
+            fs::write(self.inbox.join(name), content).unwrap();
         }
     }
 
     impl Drop for TestVault {
         fn drop(&mut self) {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let outbox = self.root.join("Outbox");
-                if outbox.exists() {
-                    let _ = fs::set_permissions(&outbox, fs::Permissions::from_mode(0o755));
+            // Clean up parent dir (root)
+            if let Some(root) = self.inbox.parent() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if self.outbox.exists() {
+                        let _ =
+                            fs::set_permissions(&self.outbox, fs::Permissions::from_mode(0o755));
+                    }
                 }
+                let _ = fs::remove_dir_all(root);
             }
-            let _ = fs::remove_dir_all(&self.root);
         }
     }
 
@@ -420,30 +393,20 @@ mod tests {
     fn run_with_vault(vault: &TestVault, dry_run: bool) -> i32 {
         // SAFETY: tests run with --test-threads=1 so no concurrent env mutation
         unsafe {
-            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
-            std::env::set_var(
-                "DIGEST_ENVELOPE_DIR",
-                vault.root.join("Envelopes").to_str().unwrap(),
-            );
+            std::env::set_var("LLM_CMD", mock_path().to_str().unwrap());
+            std::env::remove_var("API_URL");
+            std::env::remove_var("API_KEY");
             std::env::remove_var("MOCK_OPENCLAW_FAIL");
             std::env::remove_var("MOCK_OPENCLAW_INVALID");
             std::env::remove_var("MOCK_OPENCLAW_LOG");
         }
         run(
-            Some(vault.root.to_string_lossy().to_string()),
+            vault.inbox.to_str().unwrap(),
+            vault.outbox.to_str().unwrap(),
             dry_run,
             10,
             true,
         )
-    }
-
-    fn find_envelope(vault: &TestVault) -> serde_json::Value {
-        let envelope_file = fs::read_dir(vault.root.join("Envelopes"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-            .expect("No envelope.json found in Envelopes/");
-        serde_json::from_str(&fs::read_to_string(envelope_file.path()).unwrap()).unwrap()
     }
 
     #[test]
@@ -451,70 +414,75 @@ mod tests {
         let vault = TestVault::new();
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
-        assert_eq!(fs::read_dir(vault.root.join("Outbox")).unwrap().count(), 0);
+        assert_eq!(
+            fs::read_dir(&vault.outbox)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+                .count(),
+            0
+        );
     }
 
     #[test]
     fn test_happy_path_enriched() {
         let vault = TestVault::new();
-        vault.create_project("openclaw-daily-digest");
         vault.place_inbox(
             "test-task.md",
-            "Project: openclaw-daily-digest\n\nFix the envelope writer.",
+            "Project: some-project\n\nFix the envelope writer.",
         );
 
         let code = run_with_vault(&vault, false);
         assert_eq!(code, 0);
 
         // Item moved to Processed
-        assert!(!vault.root.join("Inbox/test-task.md").exists());
-        assert!(vault.root.join("Inbox/Processed/test-task.md").exists());
+        assert!(!vault.inbox.join("test-task.md").exists());
+        assert!(vault.inbox.join("Processed/test-task.md").exists());
 
         // Outbox has report
-        let outbox_files: Vec<_> = fs::read_dir(vault.root.join("Outbox"))
+        let outbox_files: Vec<_> = fs::read_dir(&vault.outbox)
             .unwrap()
             .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file() && e.path().to_string_lossy().contains("digest"))
             .collect();
         assert!(!outbox_files.is_empty());
 
-        // Envelope is in Envelopes dir with correct fields
-        let envelope = find_envelope(&vault);
-        assert_eq!(envelope["status"], "enriched");
-        assert_eq!(envelope["classification"]["project"]["kind"], "existing");
-
-        // Log exists
-        assert!(fs::read_dir(vault.root.join("Logs")).unwrap().count() > 0);
+        // Report contains enrichment
+        let report = fs::read_to_string(outbox_files[0].path()).unwrap();
+        assert!(report.contains("## Planned Actions"));
+        assert!(report.contains("Mock action 1"));
     }
 
     #[test]
-    fn test_openclaw_failure_unenriched() {
+    fn test_llm_failure_unenriched() {
         let vault = TestVault::new();
         // SAFETY: tests run with --test-threads=1 so no concurrent env mutation
         unsafe {
-            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
+            std::env::set_var("LLM_CMD", mock_path().to_str().unwrap());
             std::env::set_var("MOCK_OPENCLAW_FAIL", "1");
-            std::env::set_var(
-                "DIGEST_ENVELOPE_DIR",
-                vault.root.join("Envelopes").to_str().unwrap(),
-            );
+            std::env::remove_var("API_URL");
         }
-        vault.create_project("openclaw-daily-digest");
-        vault.place_inbox(
-            "fail-task.md",
-            "Project: openclaw-daily-digest\n\nFix something.",
-        );
+        vault.place_inbox("fail-task.md", "Project: some-project\n\nFix something.");
 
         let code = run(
-            Some(vault.root.to_string_lossy().to_string()),
+            vault.inbox.to_str().unwrap(),
+            vault.outbox.to_str().unwrap(),
             false,
             10,
             true,
         );
         assert_eq!(code, 0);
-        assert!(vault.root.join("Inbox/Processed/fail-task.md").exists());
+        assert!(vault.inbox.join("Processed/fail-task.md").exists());
 
-        let envelope = find_envelope(&vault);
-        assert_eq!(envelope["status"], "unenriched");
+        // Report should exist but with fallback enrichment
+        let outbox_files: Vec<_> = fs::read_dir(&vault.outbox)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file() && e.path().to_string_lossy().contains("digest"))
+            .collect();
+        assert!(!outbox_files.is_empty());
+        let report = fs::read_to_string(outbox_files[0].path()).unwrap();
+        assert!(report.contains("manual review required"));
     }
 
     #[test]
@@ -524,8 +492,8 @@ mod tests {
 
         let code = run_with_vault(&vault, true);
         assert_eq!(code, 0);
-        assert!(vault.root.join("Inbox/dry-task.md").exists());
-        assert!(!vault.root.join("Inbox/Processed/dry-task.md").exists());
+        assert!(vault.inbox.join("dry-task.md").exists());
+        assert!(!vault.inbox.join("Processed/dry-task.md").exists());
     }
 
     #[test]
@@ -536,8 +504,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(vault.root.join("Outbox"), fs::Permissions::from_mode(0o000))
-                .unwrap();
+            fs::set_permissions(&vault.outbox, fs::Permissions::from_mode(0o000)).unwrap();
         }
 
         let code = run_with_vault(&vault, false);
@@ -546,11 +513,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(vault.root.join("Outbox"), fs::Permissions::from_mode(0o755))
-                .unwrap();
+            fs::set_permissions(&vault.outbox, fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        assert!(vault.root.join("Inbox/Failed/io-task.md").exists());
+        assert!(vault.inbox.join("Failed/io-task.md").exists());
     }
 
     #[test]
@@ -564,12 +530,12 @@ mod tests {
         assert_eq!(code, 0);
 
         // All three should be in Processed
-        assert!(vault.root.join("Inbox/Processed/a-task.md").exists());
-        assert!(vault.root.join("Inbox/Processed/b-task.md").exists());
-        assert!(vault.root.join("Inbox/Processed/c-task.md").exists());
+        assert!(vault.inbox.join("Processed/a-task.md").exists());
+        assert!(vault.inbox.join("Processed/b-task.md").exists());
+        assert!(vault.inbox.join("Processed/c-task.md").exists());
 
         // No items left in Inbox
-        let remaining: Vec<_> = fs::read_dir(vault.root.join("Inbox"))
+        let remaining: Vec<_> = fs::read_dir(&vault.inbox)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_file() && e.path().extension().is_some_and(|ext| ext == "md"))
@@ -577,12 +543,12 @@ mod tests {
         assert_eq!(remaining.len(), 0);
 
         // Outbox should have 3 digest reports
-        let outbox_count = fs::read_dir(vault.root.join("Outbox")).unwrap().count();
+        let outbox_count = fs::read_dir(&vault.outbox)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file() && e.path().to_string_lossy().contains("digest"))
+            .count();
         assert_eq!(outbox_count, 3);
-
-        // Envelopes dir should have 3 envelope files
-        let envelope_count = fs::read_dir(vault.root.join("Envelopes")).unwrap().count();
-        assert_eq!(envelope_count, 3);
     }
 
     #[test]
@@ -594,17 +560,15 @@ mod tests {
 
         // SAFETY: tests run with --test-threads=1
         unsafe {
-            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
-            std::env::set_var(
-                "DIGEST_ENVELOPE_DIR",
-                vault.root.join("Envelopes").to_str().unwrap(),
-            );
+            std::env::set_var("LLM_CMD", mock_path().to_str().unwrap());
+            std::env::remove_var("API_URL");
             std::env::remove_var("MOCK_OPENCLAW_FAIL");
             std::env::remove_var("MOCK_OPENCLAW_INVALID");
         }
 
         let code = run(
-            Some(vault.root.to_string_lossy().to_string()),
+            vault.inbox.to_str().unwrap(),
+            vault.outbox.to_str().unwrap(),
             false,
             2,
             true,
@@ -612,14 +576,14 @@ mod tests {
         assert_eq!(code, 0);
 
         // Only 2 processed, 1 remaining
-        let processed_count = fs::read_dir(vault.root.join("Inbox/Processed"))
+        let processed_count = fs::read_dir(vault.inbox.join("Processed"))
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
             .count();
         assert_eq!(processed_count, 2);
 
-        let remaining_count = fs::read_dir(vault.root.join("Inbox"))
+        let remaining_count = fs::read_dir(&vault.inbox)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_file() && e.path().extension().is_some_and(|ext| ext == "md"))
@@ -687,197 +651,31 @@ mod tests {
     }
 
     #[test]
-    fn test_repo_change_skipped_no_git_repo() {
-        let vault = TestVault::new();
-        // Create project dir without .git
-        vault.create_project("my-project");
-        vault.place_inbox(
-            "fix-thing.md",
-            "Project: my-project\n\nFix the broken thing.",
-        );
-
-        let code = run_with_vault(&vault, false);
-        assert_eq!(code, 0);
-        assert!(vault.root.join("Inbox/Processed/fix-thing.md").exists());
-
-        let envelope = find_envelope(&vault);
-        // repo-change should be skipped because no .git dir exists
-        assert_eq!(envelope["execution"]["status"], "skipped");
-        assert_eq!(envelope["execution"]["handler"], "repo-change");
-    }
-
-    #[test]
-    fn test_ops_executed_with_output() {
-        let vault = TestVault::new();
-        vault.place_inbox("install-thing.md", "Install htop via brew.\nlaunchctl list");
-
-        let code = run_with_vault(&vault, false);
-        assert_eq!(code, 0);
-        assert!(vault.root.join("Inbox/Processed/install-thing.md").exists());
-
-        // Should have an ops-log file in outbox
-        let ops_log: Vec<_> = fs::read_dir(vault.root.join("Outbox"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().to_string_lossy().contains(".ops-log.md"))
-            .collect();
-        assert_eq!(ops_log.len(), 1);
-
-        let envelope = find_envelope(&vault);
-        assert_eq!(envelope["execution"]["handler"], "ops");
-        assert_eq!(envelope["execution"]["status"], "completed");
-    }
-
-    #[test]
-    fn test_ops_skipped_dangerous_task() {
-        let vault = TestVault::new();
-        vault.place_inbox(
-            "dangerous-task.md",
-            "Install a cleanup tool. Then run rm -rf / to clean up disk space.",
-        );
-
-        let code = run_with_vault(&vault, false);
-        assert_eq!(code, 0);
-        assert!(
-            vault
-                .root
-                .join("Inbox/Processed/dangerous-task.md")
-                .exists()
-        );
-
-        let envelope = find_envelope(&vault);
-        assert_eq!(envelope["execution"]["status"], "skipped");
-    }
-
-    #[test]
-    fn test_new_project_creates_dir_and_readme() {
-        let vault = TestVault::new();
-        vault.place_inbox(
-            "new-proj.md",
-            "Project: home-automation\n\nResearch HomeKit on a Pi. Compare the options.",
-        );
-        let code = run_with_vault(&vault, false);
-        assert_eq!(code, 0);
-        let proj = vault.root.join("Projects/home-automation");
-        assert!(proj.exists());
-        assert!(proj.join("README.md").exists());
-        assert!(proj.join("Inbox").exists());
-        let envelope = find_envelope(&vault);
-        assert_eq!(envelope["classification"]["project"]["kind"], "new");
-        assert_eq!(
-            envelope["classification"]["project"]["name"],
-            "home-automation"
-        );
-    }
-
-    #[test]
-    fn test_research_handler_produces_output() {
-        let vault = TestVault::new();
-        vault.place_inbox(
-            "research.md",
-            "Compare HomeAssistant vs Homebridge for HomeKit.",
-        );
-        let code = run_with_vault(&vault, false);
-        assert_eq!(code, 0);
-        let research: Vec<_> = fs::read_dir(vault.root.join("Outbox"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().to_string_lossy().contains(".research.md"))
-            .collect();
-        assert_eq!(research.len(), 1);
-        let content = fs::read_to_string(research[0].path()).unwrap();
-        assert!(content.contains("## Summary"));
-    }
-
-    #[test]
-    fn test_question_handler_produces_answer() {
-        let vault = TestVault::new();
-        vault.place_inbox("q.md", "What is the difference between launchd and cron?");
-        let code = run_with_vault(&vault, false);
-        assert_eq!(code, 0);
-        let answers: Vec<_> = fs::read_dir(vault.root.join("Outbox"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().to_string_lossy().contains(".research.md"))
-            .collect();
-        assert_eq!(answers.len(), 1);
-        let content = fs::read_to_string(answers[0].path()).unwrap();
-        assert!(content.contains("## Answer"));
-        let envelope = find_envelope(&vault);
-        assert_eq!(envelope["action_type"]["action_type"], "question");
-    }
-
-    #[test]
-    fn test_tag_routing_existing_project() {
-        let vault = TestVault::new();
-        vault.create_project("openclaw-daily-digest");
-        vault.place_inbox(
-            "tag.md",
-            "#project/openclaw-daily-digest\n\nUpdate the README.",
-        );
-        let code = run_with_vault(&vault, false);
-        assert_eq!(code, 0);
-        let envelope = find_envelope(&vault);
-        assert_eq!(envelope["classification"]["project"]["kind"], "existing");
-        assert_eq!(
-            envelope["classification"]["project"]["name"],
-            "openclaw-daily-digest"
-        );
-    }
-
-    #[test]
-    fn test_unclassified_note_uses_ai_fallback() {
-        let vault = TestVault::new();
-        vault.place_inbox("groceries.md", "Pick up milk, eggs, bread, coffee beans.");
-        let code = run_with_vault(&vault, false);
-        assert_eq!(code, 0);
-        let envelope = find_envelope(&vault);
-        assert_eq!(envelope["action_type"]["action_type"], "note");
-        assert_eq!(envelope["execution"]["status"], "none");
-    }
-
-    #[test]
-    fn test_openclaw_invalid_json_unenriched() {
+    fn test_llm_invalid_json_unenriched() {
         let vault = TestVault::new();
         unsafe {
-            std::env::set_var("OPENCLAW_CMD", mock_path().to_str().unwrap());
+            std::env::set_var("LLM_CMD", mock_path().to_str().unwrap());
             std::env::set_var("MOCK_OPENCLAW_INVALID", "1");
-            std::env::set_var(
-                "DIGEST_ENVELOPE_DIR",
-                vault.root.join("Envelopes").to_str().unwrap(),
-            );
+            std::env::remove_var("API_URL");
         }
         vault.place_inbox("invalid.md", "Some random note.");
         let code = run(
-            Some(vault.root.to_string_lossy().to_string()),
+            vault.inbox.to_str().unwrap(),
+            vault.outbox.to_str().unwrap(),
             false,
             10,
             true,
         );
         assert_eq!(code, 0);
-        let envelope = find_envelope(&vault);
-        assert_eq!(envelope["status"], "unenriched");
-    }
-
-    #[test]
-    fn test_log_entry_format() {
-        let vault = TestVault::new();
-        vault.create_project("openclaw-daily-digest");
-        vault.place_inbox(
-            "log-test.md",
-            "Project: openclaw-daily-digest\n\nFix something.",
-        );
-        let code = run_with_vault(&vault, false);
-        assert_eq!(code, 0);
-        let logs: Vec<_> = fs::read_dir(vault.root.join("Logs"))
+        // Report should have fallback enrichment
+        let outbox_files: Vec<_> = fs::read_dir(&vault.outbox)
             .unwrap()
             .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file() && e.path().to_string_lossy().contains("digest"))
             .collect();
-        assert!(!logs.is_empty());
-        let content = fs::read_to_string(logs[0].path()).unwrap();
-        assert!(content.contains("log-test.md"));
-        assert!(content.contains("Processed/"));
-        assert!(content.contains("enriched"));
+        assert!(!outbox_files.is_empty());
+        let report = fs::read_to_string(outbox_files[0].path()).unwrap();
+        assert!(report.contains("manual review required"));
     }
 
     #[test]
@@ -909,5 +707,49 @@ mod tests {
         assert!(dir.join("digest-stderr.log").exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_action_type_classification() {
+        let vault = TestVault::new();
+        vault.place_inbox("groceries.md", "Pick up milk, eggs, bread, coffee beans.");
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+
+        // Should be classified as "note" (no action keywords)
+        let outbox_files: Vec<_> = fs::read_dir(&vault.outbox)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file() && e.path().to_string_lossy().contains("digest"))
+            .collect();
+        assert!(!outbox_files.is_empty());
+        let report = fs::read_to_string(outbox_files[0].path()).unwrap();
+        assert!(report.contains("**Type:** note"));
+    }
+
+    #[test]
+    fn test_api_push_skipped_when_no_config() {
+        let vault = TestVault::new();
+        vault.place_inbox("api-test.md", "Research Rust async patterns.");
+        let code = run_with_vault(&vault, false);
+        assert_eq!(code, 0);
+
+        let outbox_files: Vec<_> = fs::read_dir(&vault.outbox)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file() && e.path().to_string_lossy().contains("digest"))
+            .collect();
+        assert!(!outbox_files.is_empty());
+        let report = fs::read_to_string(outbox_files[0].path()).unwrap();
+        assert!(report.contains("Skipped (no API configured)"));
+    }
+
+    #[test]
+    fn test_map_task_type() {
+        assert_eq!(map_task_type("research"), "research");
+        assert_eq!(map_task_type("question"), "research");
+        assert_eq!(map_task_type("repo-change"), "dev");
+        assert_eq!(map_task_type("ops"), "dev");
+        assert_eq!(map_task_type("note"), "dev");
     }
 }

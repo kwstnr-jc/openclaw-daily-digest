@@ -1,4 +1,4 @@
 [env]
-# Tests use process-global env vars (OPENCLAW_CMD, MOCK_OPENCLAW_*)
+# Tests use process-global env vars (LLM_CMD, MOCK_OPENCLAW_*)
 # and must run single-threaded to avoid races.
 RUST_TEST_THREADS = "1"

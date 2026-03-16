@@ -1,3 +1,4 @@
+#[allow(clippy::too_many_arguments)]
 pub fn build_report(
     task_content: &str,
     source_stem: &str,
@@ -6,11 +7,10 @@ pub fn build_report(
     classification_method: &str,
     action_type: &str,
     action_type_method: &str,
-    exec_result: &str,
-    exec_file: Option<&str>,
     enrichment_rendered: &str,
     enriched: bool,
     enrichment_json: &serde_json::Value,
+    api_pushed: bool,
 ) -> String {
     let mut report = String::new();
 
@@ -39,13 +39,12 @@ pub fn build_report(
     report.push_str(&format!("- **Type:** {}\n", action_type));
     report.push_str(&format!("- **Method:** {}\n\n", action_type_method));
 
-    report.push_str("## Execution\n\n");
-    report.push_str(&format!("- **Handler:** {}\n", action_type));
-    report.push_str(&format!("- **Status:** {}\n", exec_result));
-    if let Some(fname) = exec_file {
-        report.push_str(&format!("- **Output:** {}\n", fname));
+    report.push_str("## API\n\n");
+    if api_pushed {
+        report.push_str("- Task pushed to task-orchestrator API\n\n");
+    } else {
+        report.push_str("- Skipped (no API configured)\n\n");
     }
-    report.push('\n');
 
     report.push_str(enrichment_rendered);
 

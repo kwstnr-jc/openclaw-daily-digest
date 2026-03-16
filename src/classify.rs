@@ -2,12 +2,12 @@ use std::fs;
 use std::path::Path;
 
 use crate::types::{ActionTypeClassification, ProjectClassification};
-use crate::util::{call_openclaw, extract_json, which_exists};
+use crate::util::{call_llm, extract_json, which_exists};
 
 pub fn classify_project(
     task_content: &str,
     projects_dir: &Path,
-    openclaw_cmd: &str,
+    llm_cmd: &str,
 ) -> (String, Option<String>, String, serde_json::Value) {
     // Rule 1: Explicit "Project: <name>" line
     for line in task_content.lines() {
@@ -89,15 +89,7 @@ pub fn classify_project(
     }
 
     // Rule 4: AI classification
-    if which_exists(openclaw_cmd) {
-        let args_base = vec![
-            "agent".to_string(),
-            "--agent".to_string(),
-            "main".to_string(),
-            "--timeout".to_string(),
-            "120".to_string(),
-        ];
-
+    if which_exists(llm_cmd) {
         let existing_projects = fs::read_dir(projects_dir)
             .ok()
             .map(|entries| {
@@ -123,12 +115,9 @@ pub fn classify_project(
              Task:\n{}",
             existing_projects, task_content
         );
-        let mut args = args_base;
-        args.push("--message".to_string());
-        args.push(prompt);
 
-        println!("Calling OpenClaw for project classification...");
-        if let Some(output) = call_openclaw(openclaw_cmd, &args) {
+        println!("Calling LLM for project classification...");
+        if let Some(output) = call_llm(llm_cmd, &prompt) {
             if let Some(parsed) = extract_json(&output)
                 && let Ok(classification) =
                     serde_json::from_value::<ProjectClassification>(parsed.clone())
@@ -157,7 +146,7 @@ pub fn classify_project(
 
 pub fn classify_action_type(
     task_content: &str,
-    openclaw_cmd: &str,
+    llm_cmd: &str,
 ) -> (String, String, serde_json::Value) {
     let task_lower = task_content.to_lowercase();
 
@@ -187,15 +176,7 @@ pub fn classify_action_type(
     }
 
     // AI fallback
-    if which_exists(openclaw_cmd) {
-        let mut args = vec![
-            "agent".to_string(),
-            "--agent".to_string(),
-            "main".to_string(),
-            "--timeout".to_string(),
-            "120".to_string(),
-        ];
-
+    if which_exists(llm_cmd) {
         let prompt = format!(
             "You are a strict JSON API. Classify the action type for the following task.\n\n\
              Return ONLY a JSON object:\n\
@@ -211,11 +192,9 @@ pub fn classify_action_type(
              Task:\n{}",
             task_content
         );
-        args.push("--message".to_string());
-        args.push(prompt);
 
-        println!("Calling OpenClaw for action type classification...");
-        if let Some(output) = call_openclaw(openclaw_cmd, &args) {
+        println!("Calling LLM for action type classification...");
+        if let Some(output) = call_llm(llm_cmd, &prompt) {
             if let Some(parsed) = extract_json(&output)
                 && let Ok(at) = serde_json::from_value::<ActionTypeClassification>(parsed.clone())
             {
